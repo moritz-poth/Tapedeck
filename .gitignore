@@ -1,0 +1,4 @@
+# Build output (recreate with ./build.sh or ./dmg.sh)
+SystemRecorder.app/
+*.dmg
+.DS_Store
