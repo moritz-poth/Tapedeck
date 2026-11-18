@@ -839,7 +839,7 @@ struct EditorView: View {
             if let model { EditorContent(model: model) }
             else { Text(loadError ?? "Lade…").foregroundStyle(Deck.label).padding() }
         }
-        .frame(minWidth: 820, minHeight: 420)
+        .frame(minWidth: 1040, minHeight: 500)   // the designed size is the smallest; larger is fine
         .background(Deck.panel)
         .environment(\.colorScheme, .light)   // hardware look stays grey in dark mode
         .onAppear {

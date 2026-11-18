@@ -1,6 +1,6 @@
 #!/bin/bash
-# Builds the app and packs it into Tapedeck.dmg: the window as in Mountpoint's image – app left, brush arrow,
-# link to /Applications ("Programme") right, background from scripts/make-dmg-background.swift.
+# Builds the app and packs it into Tapedeck.dmg: the shared DMG look of Moe's apps (moe-apps skill, "DMG window") –
+# 660 × 400 window, app left, link to /Applications ("Programme") right, background from scripts/make-dmg-background.swift.
 set -euo pipefail
 cd "$(dirname "$0")"
 ./build.sh
@@ -10,8 +10,8 @@ RW="$(mktemp -d)/rw.dmg"
 cp -R Tapedeck.app "$STAGE/"
 ln -s /Applications "$STAGE/Programme"
 mkdir "$STAGE/.background"
-swift scripts/make-dmg-background.swift "$STAGE/bg.png" 1
-swift scripts/make-dmg-background.swift "$STAGE/bg@2x.png" 2
+swift scripts/make-dmg-background.swift AppIcon.png "$STAGE/bg.png" 1
+swift scripts/make-dmg-background.swift AppIcon.png "$STAGE/bg@2x.png" 2
 tiffutil -cathidpicheck "$STAGE/bg.png" "$STAGE/bg@2x.png" -out "$STAGE/.background/background.tiff" 2>/dev/null
 mv "$STAGE/bg.png" "$STAGE/bg@2x.png" "$(dirname "$RW")/"
 # never eject someone else's volume, and Finder's disk "Tapedeck" below must be ours
@@ -29,13 +29,15 @@ tell application "Finder"
     open
     set current view of container window to icon view
     set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set pathbar visible of container window to false
     set opts to icon view options of container window
     set arrangement of opts to not arranged
     set icon size of opts to 128
     set background picture of opts to file ".background:background.tiff"
-    set position of item "Tapedeck.app" of container window to {140, 160}
-    set position of item "Programme" of container window to {400, 160}
-    set bounds of container window to {200, 120, 740, 460}
+    set position of item "Tapedeck.app" of container window to {170, 188}
+    set position of item "Programme" of container window to {490, 188}
+    set bounds of container window to {200, 120, 860, 548}   -- 400 pt content + 28 pt title bar
     update without registering applications
     delay 2
     close
