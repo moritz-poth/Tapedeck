@@ -867,7 +867,6 @@ struct EditorContent: View {
     private var status: String? {
         if let e = model.error { return e }
         if model.importing { return "importiere …" }
-        if model.speed < 0 || model.speed > 1 { return model.speed < 0 ? "◂ \(-model.speed)×" : "▸ \(model.speed)×" }
         return nil
     }
 

@@ -58,7 +58,7 @@ After you stop, the editor opens: trim the recording, cut out what you don't nee
 1. Download `Tapedeck-<version>.dmg` from [Releases](../../releases) and open it.
 2. Drag `Tapedeck.app` onto the **Programme** (Applications) folder in the window that opens.
 
-<p align="center"><img src="assets/screenshots/dmg.png" width="460" alt="Download image window: Tapedeck on a petrol half, the Applications folder on a light half, a trail of fading icons between them"></p>
+<p align="center"><img src="assets/screenshots/dmg.png" width="460" alt="Download image window: Tapedeck on a dark tape-brown half, the Applications folder on a light half, a trail of fading icons between them"></p>
 
 ### First launch: “Apple could not verify …”
 

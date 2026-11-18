@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 APP=Tapedeck.app
-VERSION=1.2.1   # release tag v$VERSION, update zip Tapedeck-$VERSION.zip
+VERSION=1.2.2   # release tag v$VERSION, update zip Tapedeck-$VERSION.zip
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"

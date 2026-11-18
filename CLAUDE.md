@@ -8,4 +8,4 @@ Tiny macOS app (SwiftUI, macOS 13+): records the system audio to WAV 48 kHz / 24
 
 ## DMG window
 
-Shared look (moe-apps "DMG window"), drawn by `scripts/make-dmg-background.swift`. **Left colour: petrol #239A8C** (owner's choice 2026-11-18, counter-colour to the red record dot; labels 4.9:1, icon 2.6:1). Orange and dark tones were rejected – the Finder keeps the icon labels black in both appearances.
+Shared look (moe-apps "DMG window"), drawn by `scripts/make-dmg-background.swift`. **Left colour: tape brown #2A2623**, the brown of the editor's timeline (owner's decision 2026-11-18, after petrol, orange and a lighter brown #96836B were rejected). Known trade-off, accepted by the owner: the Finder draws the icon labels black in both appearances, so the name "Tapedeck" under the app icon is barely readable on it (1.1:1); the icon itself stands out strongly (11:1).

@@ -1,5 +1,5 @@
 // Draws the background of the download image's window, the DMG look shared by all of Moe's apps (moe-apps skill,
-// "DMG window"): 660 × 400 pt, split in the middle – left the app's colour (Tapedeck: petrol #239A8C, the counter-colour to the red record dot), right #F4F4F6.
+// "DMG window"): 660 × 400 pt, split in the middle – left the app's colour (Tapedeck: #2A2623, the tape brown of the editor's timeline), right #F4F4F6.
 // No text. Between the app icon (centre 170, 188) and the Applications link (centre 490, 188) a motion trail:
 // a small, 10 % lighter copy of the app icon at the right end (x 354–402) and behind it 5 silhouettes of the icon's
 // plate, 19.2 pt apart, opacity rising from left to right like in-between frames of a movement.
@@ -15,7 +15,7 @@ guard args.count == 4, let icon = NSImage(contentsOfFile: args[1]), let scale = 
     FileHandle.standardError.write(Data("usage: make-dmg-background.swift <AppIcon.png> <out.png> <scale>\n".utf8)); exit(1)
 }
 let w = 660.0, h = 400.0, midY = 188.0
-// sRGB throughout, so #239A8C lands as #239A8C in the Finder
+// sRGB throughout, so the colours land unchanged in the Finder
 let srgb = CGColorSpace(name: CGColorSpace.sRGB)!
 let cg = CGContext(data: nil, width: Int(w * scale), height: Int(h * scale), bitsPerComponent: 8, bytesPerRow: 0,
                    space: srgb, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
@@ -25,7 +25,7 @@ cg.translateBy(x: 0, y: h)
 cg.scaleBy(x: 1, y: -1)
 
 // split background
-cg.setFillColor(color(0x239A8C)); cg.fill(CGRect(x: 0, y: 0, width: w / 2, height: h))
+cg.setFillColor(color(0x2A2623)); cg.fill(CGRect(x: 0, y: 0, width: w / 2, height: h))
 cg.setFillColor(color(0xF4F4F6)); cg.fill(CGRect(x: w / 2, y: 0, width: w / 2, height: h))
 
 // the icon's plate: 42.8 pt inside the 48 pt icon box (AppIcon.png puts its 824 px plate on Apple's 1024 grid)
