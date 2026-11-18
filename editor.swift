@@ -1,7 +1,15 @@
-// Mini editor: waveform timeline, In/Out, Extract (cut + close gap), zoom, play, save as WAV.
+// Mini editor: waveform timeline, In/Out, Extract (cut + close gap), J/K/L shuttle, appended files, clips moved by drag,
+// zoom, play, save as WAV.
 import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
+
+/// One piece of the timeline: a frame range of one source file.
+struct Clip: Equatable {
+    var src: Int                 // index into EditorModel.files
+    var range: Range<Int>
+    var count: Int { range.count }
+}
 
 @MainActor final class EditorModel: ObservableObject {
     /// Open editors, so quitting can ask about each unsaved one.
@@ -13,10 +21,11 @@ import UniformTypeIdentifiers
 
     let url: URL
     let sampleRate: Double
-    @Published var peaks: [Float] = []
-    /// Edit list: source frame ranges in timeline order. Extract only changes this list.
-    @Published var segments: [Range<Int>]
-    private var undoStack: [[Range<Int>]] = []
+    /// Waveform peaks per source file (index = Clip.src). The recording's are filled in after loading.
+    @Published var peaks: [[Float]] = [[]]
+    /// Edit list: clips in timeline order. Extract, import and moving clips only change this list.
+    @Published var segments: [Clip]
+    private var undoStack: [[Clip]] = []
     var canUndo: Bool { !undoStack.isEmpty }
 
     @Published var playhead = 0
@@ -24,7 +33,12 @@ import UniformTypeIdentifiers
     @Published var markOut: Int?
     @Published var framesPerPixel = 1.0
     @Published var viewStart = 0.0
-    @Published var playing = false
+    /// Shuttle speed: 1, 2, 4 forward (L), -1, -2, -4 backward (J), 0 = stopped.
+    @Published private(set) var speed = 0
+    var playing: Bool { speed != 0 }
+    @Published private(set) var importing = false
+    /// Timeline index of the clip being dragged.
+    @Published private(set) var dragged: Int?
     @Published var error: String?
     /// Vertical waveform zoom as power of two: 0 = 1x … 5 = 32x.
     @Published var ampZoom = 0.0
@@ -33,23 +47,40 @@ import UniformTypeIdentifiers
     var viewWidth = 600.0
     private var isFit = true
 
-    private let file: AVAudioFile
+    /// Source files: 0 = the recording, then appended files converted to its format. `files` feed the player,
+    /// `readers` are separate handles for reverse play and saving (reading moves a file's position).
+    private var files: [AVAudioFile]
+    private var readers: [AVAudioFile]
+    /// Converted copies of appended files; deleted with the recording.
+    private var imported: [URL] = []
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    private let varispeed = AVAudioUnitVarispeed()
     private var playStart = 0
     private var timer: Timer?
+    /// Reverse play queues one-second buffers; `reverseCursor` is where the next one ends.
+    private var reverseCursor = 0
+    /// Bumped on every stop, so completion handlers of an old playback don't queue more audio.
+    private var generation = 0
+    private var dragClip: Clip?
+    private var dragBase: [Clip] = []
+    private var dragGrab = 0
 
     init(url: URL) throws {
         self.url = url
-        file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        files = [file]
+        readers = [try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)]
         sampleRate = file.processingFormat.sampleRate
-        segments = [0..<Int(file.length)]
+        segments = [Clip(src: 0, range: 0..<Int(file.length))]
         engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: file.processingFormat)
+        engine.attach(varispeed)
+        engine.connect(player, to: varispeed, format: file.processingFormat)
+        engine.connect(varispeed, to: engine.mainMixerNode, format: file.processingFormat)
         Self.open.add(self)
         Task {
             let p = try? await Task.detached { try Self.computePeaks(url) }.value
-            peaks = p ?? []
+            peaks[0] = p ?? []
             fit()
         }
     }
@@ -84,25 +115,46 @@ import UniformTypeIdentifiers
 
     var length: Int { segments.reduce(0) { $0 + $1.count } }
 
-    /// Calls `body` with the source ranges that make up timeline range `r`.
-    func forEachSource(in r: Range<Int>, _ body: (Range<Int>) -> Void) {
+    /// Calls `body` with the source file and its frame ranges that make up timeline range `r`.
+    func forEachSource(in r: Range<Int>, _ body: (Int, Range<Int>) -> Void) {
         var t = 0
         for s in segments {
             let lo = max(r.lowerBound, t), hi = min(r.upperBound, t + s.count)
-            if lo < hi { body((s.lowerBound + lo - t)..<(s.lowerBound + hi - t)) }
+            if lo < hi { body(s.src, (s.range.lowerBound + lo - t)..<(s.range.lowerBound + hi - t)) }
             t += s.count
             if t >= r.upperBound { break }
         }
     }
 
     func peak(_ r: Range<Int>) -> Float {
-        guard !peaks.isEmpty else { return 0 }
         var m: Float = 0
-        forEachSource(in: r) { s in
-            let lo = s.lowerBound / Self.block, hi = min(peaks.count - 1, (s.upperBound - 1) / Self.block)
-            if lo <= hi { for i in lo...hi { m = max(m, peaks[i]) } }
+        forEachSource(in: r) { src, s in
+            let p = peaks[src]
+            let lo = s.lowerBound / Self.block, hi = min(p.count - 1, (s.upperBound - 1) / Self.block)
+            if lo <= hi { for i in lo...hi { m = max(m, p[i]) } }
         }
         return m
+    }
+
+    /// Reads timeline range `r` (across clips) into one buffer.
+    private func read(_ r: Range<Int>) throws -> AVAudioPCMBuffer {
+        let fmt = files[0].processingFormat
+        let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(r.count))!
+        let tmp = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(r.count))!
+        var failure: Error?
+        forEachSource(in: r) { src, s in
+            guard failure == nil else { return }
+            do {
+                let f = readers[src]
+                f.framePosition = AVAudioFramePosition(s.lowerBound)
+                try f.read(into: tmp, frameCount: AVAudioFrameCount(s.count))
+                let n = Int(tmp.frameLength), o = Int(buf.frameLength)
+                for c in 0..<Int(fmt.channelCount) { (buf.floatChannelData![c] + o).update(from: tmp.floatChannelData![c], count: n) }
+                buf.frameLength += AVAudioFrameCount(n)
+            } catch { failure = error }
+        }
+        if let failure { throw failure }
+        return buf
     }
 
     /// Timeline positions of the cuts made so far.
@@ -130,15 +182,15 @@ import UniformTypeIdentifiers
         guard i < o else { return }
         stopPlayback()
         undoStack.append(segments)
-        var out: [Range<Int>] = []
+        var out: [Clip] = []
         var t = 0
         for s in segments {
             let a = t, b = t + s.count
             if b <= i || a >= o {
                 out.append(s)
             } else {
-                if a < i { out.append(s.lowerBound..<(s.lowerBound + i - a)) }
-                if b > o { out.append((s.lowerBound + o - a)..<s.upperBound) }
+                if a < i { out.append(Clip(src: s.src, range: s.range.lowerBound..<(s.range.lowerBound + i - a))) }
+                if b > o { out.append(Clip(src: s.src, range: (s.range.lowerBound + o - a)..<s.range.upperBound)) }
             }
             t = b
         }
@@ -154,6 +206,115 @@ import UniformTypeIdentifiers
         stopPlayback()
         segments = prev
         afterLengthChange()
+    }
+
+    // MARK: append files
+
+    /// "+": appends audio files at the end, each converted to the recording's format (rate, channels, 24 bit).
+    func importFiles() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = true
+        panel.message = "Audiodateien ans Ende der Timeline anfügen"
+        guard panel.runModal() == .OK else { return }
+        Task { await append(panel.urls) }
+    }
+
+    func append(_ urls: [URL]) async {
+        stopPlayback()
+        importing = true
+        let fmt = files[0].processingFormat, settings = files[0].fileFormat.settings
+        let dir = url.deletingLastPathComponent()
+        for src in urls {
+            let out = dir.appendingPathComponent("SystemRecorder-import-\(UUID().uuidString).wav")
+            imported.append(out)   // before converting, so a half-written copy is deleted too
+            do {
+                try await Task.detached { try Self.convert(src, to: out, format: fmt, settings: settings) }.value
+                let p = try await Task.detached { try Self.computePeaks(out) }.value
+                files.append(try AVAudioFile(forReading: out, commonFormat: .pcmFormatFloat32, interleaved: false))
+                readers.append(try AVAudioFile(forReading: out, commonFormat: .pcmFormatFloat32, interleaved: false))
+                peaks.append(p)
+                undoStack.append(segments)
+                segments.append(Clip(src: files.count - 1, range: 0..<Int(files.last!.length)))
+                afterLengthChange()
+            } catch {
+                self.error = "Import fehlgeschlagen (\(src.lastPathComponent)): \(error.localizedDescription)"
+            }
+        }
+        importing = false
+    }
+
+    nonisolated static func convert(_ src: URL, to dst: URL, format: AVAudioFormat, settings: [String: Any]) throws {
+        let input = try AVAudioFile(forReading: src)
+        let out = try AVAudioFile(forWriting: dst, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        guard let conv = AVAudioConverter(from: input.processingFormat, to: format) else {
+            throw NSError(domain: "SystemRecorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "Format wird nicht unterstützt"])
+        }
+        conv.downmix = true   // e.g. 5.1 → stereo; mono is copied to both channels
+        conv.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Mastering
+        let inBuf = AVAudioPCMBuffer(pcmFormat: input.processingFormat, frameCapacity: 32768)!
+        let ratio = format.sampleRate / input.processingFormat.sampleRate
+        let outBuf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(32768 * ratio) + 4096)!
+        var readError: Error?
+        while true {
+            var err: NSError?
+            let status = conv.convert(to: outBuf, error: &err) { _, st in
+                guard input.framePosition < input.length else { st.pointee = .endOfStream; return nil }
+                do { try input.read(into: inBuf) } catch { readError = error; st.pointee = .endOfStream; return nil }
+                st.pointee = .haveData
+                return inBuf
+            }
+            if let e = readError ?? err { throw e }
+            if outBuf.frameLength > 0 { try out.write(from: outBuf) }
+            if status == .endOfStream { break }
+            if status == .error {
+                throw NSError(domain: "SystemRecorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "Umwandlung fehlgeschlagen"])
+            }
+        }
+    }
+
+    // MARK: move clips
+
+    /// Starts moving the clip under pixel x; false when there is nothing to reorder.
+    func beginDrag(atPixel x: Double) -> Bool {
+        guard segments.count > 1 else { return false }
+        let f = Int(viewStart + x * framesPerPixel)
+        var t = 0, hit: Int?
+        for (k, c) in segments.enumerated() {
+            if f < t + c.count { hit = k; break }
+            t += c.count
+        }
+        guard let i = hit else { return false }
+        stopPlayback()
+        undoStack.append(segments)
+        dragClip = segments[i]
+        dragBase = segments
+        dragBase.remove(at: i)
+        dragGrab = f - t
+        dragged = i
+        return true
+    }
+
+    /// Puts the dragged clip into the gap nearest to where its start would be now (live, other clips make room).
+    func drag(toPixel x: Double) {
+        guard let c = dragClip else { return }
+        let start = Int(viewStart + x * framesPerPixel) - dragGrab
+        var best = 0, bestDist = Int.max, t = 0
+        for k in 0...dragBase.count {
+            if abs(start - t) < bestDist { best = k; bestDist = abs(start - t) }
+            if k < dragBase.count { t += dragBase[k].count }
+        }
+        guard best != dragged else { return }
+        var s = dragBase
+        s.insert(c, at: best)
+        segments = s
+        dragged = best
+    }
+
+    func endDrag() {
+        if segments == undoStack.last { undoStack.removeLast() }   // dropped where it was: nothing to undo
+        dragClip = nil
+        dragged = nil
     }
 
     private func afterLengthChange() {
@@ -196,12 +357,22 @@ import UniformTypeIdentifiers
 
     func seek(toPixel x: Double) {
         playhead = min(length, max(0, Int(viewStart + x * framesPerPixel)))
-        if playing { startPlayback() }
+        if playing { play(speed: speed) }
     }
 
     // MARK: playback
 
-    func togglePlay() { playing ? stopPlayback() : startPlayback() }
+    func togglePlay() { playing ? stopPlayback() : play(speed: 1) }
+
+    /// L (dir 1) / J (dir -1): starts playing that way; pressed again while doing so, doubles the speed up to 4×.
+    func shuttle(_ dir: Int) {
+        if speed.signum() == dir {
+            speed = min(abs(speed) * 2, 4) * dir
+            varispeed.rate = Float(abs(speed))   // tape-style: pitch goes up with speed
+        } else {
+            play(speed: dir)
+        }
+    }
 
     private func startEngine() -> Bool {
         do { if !engine.isRunning { try engine.start() } } catch {
@@ -217,7 +388,7 @@ import UniformTypeIdentifiers
         for s in segments {
             let a = max(start, t), b = min(end, t + s.count)
             if a < b {
-                player.scheduleSegment(file, startingFrame: AVAudioFramePosition(s.lowerBound + a - t),
+                player.scheduleSegment(files[s.src], startingFrame: AVAudioFramePosition(s.range.lowerBound + a - t),
                                        frameCount: AVAudioFrameCount(b - a), at: nil)
             }
             t += s.count
@@ -229,6 +400,7 @@ import UniformTypeIdentifiers
     func step(_ dir: Int) {
         stopPlayback()
         let f = Int(sampleRate / Self.fps)
+        varispeed.rate = 1
         playhead = min(length, max(0, playhead + dir * f))
         let span = viewWidth * framesPerPixel
         if Double(playhead) < viewStart || Double(playhead) > viewStart + span {
@@ -240,38 +412,70 @@ import UniformTypeIdentifiers
         player.play()
     }
 
-    private func startPlayback() {
-        player.stop()
-        if playhead >= length { playhead = 0 }
+    private func play(speed s: Int) {
+        stopPlayback()
+        if s > 0, playhead >= length { playhead = 0 }
+        if s < 0, playhead <= 0 { return }   // nothing before the start
         guard startEngine() else { return }
+        varispeed.rate = Float(abs(s))
         playStart = playhead
-        schedule(from: playStart, to: length)
+        if s > 0 {
+            schedule(from: playStart, to: length)
+        } else {
+            reverseCursor = playStart
+            for _ in 0..<3 { queueReverseBuffer() }   // keep a few seconds queued; each finished one adds the next
+        }
         player.play()
-        playing = true
+        speed = s
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
     }
 
+    /// Queues the second before `reverseCursor`, sample order reversed.
+    private func queueReverseBuffer() {
+        let end = reverseCursor
+        guard end > 0 else { return }
+        let start = max(0, end - Int(sampleRate))
+        guard let buf = try? read(start..<end) else { return }
+        let n = Int(buf.frameLength)
+        for c in 0..<Int(buf.format.channelCount) {
+            var samples = UnsafeMutableBufferPointer(start: buf.floatChannelData![c], count: n)
+            samples.reverse()
+        }
+        reverseCursor = start
+        let gen = generation
+        player.scheduleBuffer(buf) { [weak self] in
+            Task { @MainActor in
+                guard let self, self.generation == gen, self.speed < 0 else { return }
+                self.queueReverseBuffer()
+            }
+        }
+    }
+
     func stopPlayback() {
+        generation += 1
         player.stop()
         timer?.invalidate()
         timer = nil
-        playing = false
+        speed = 0
     }
 
     private func tick() {
         guard let nt = player.lastRenderTime, let pt = player.playerTime(forNodeTime: nt) else { return }
-        let pos = playStart + Int(pt.sampleTime)
-        if pos >= length {
+        // sampleTime counts source frames, also when varispeed plays faster
+        let pos = playStart + speed.signum() * Int(pt.sampleTime)
+        if pos >= length || pos <= 0 {
             stopPlayback()
-            playhead = length
+            playhead = min(length, max(0, pos))
             return
         }
         playhead = pos
         // page along when the playhead leaves the view
-        if Double(pos) > viewStart + viewWidth * framesPerPixel { viewStart = Double(pos); clampView() }
+        let span = viewWidth * framesPerPixel
+        if Double(pos) > viewStart + span { viewStart = Double(pos); clampView() }
+        if Double(pos) < viewStart { viewStart = Double(pos) - span; clampView() }
     }
 
     // MARK: save / discard
@@ -283,22 +487,21 @@ import UniformTypeIdentifiers
 
     /// Writes the edit list to a new WAV next to the source, in the source's format (48 kHz / 24 bit).
     private func render() throws -> URL {
-        let src = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
         let outURL = url.deletingLastPathComponent().appendingPathComponent("SystemRecorder-edit-\(UUID().uuidString).wav")
-        let out = try AVAudioFile(forWriting: outURL, settings: src.fileFormat.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
-        let chunk = 65536
-        let buf = AVAudioPCMBuffer(pcmFormat: src.processingFormat, frameCapacity: AVAudioFrameCount(chunk))!
-        for s in segments {
-            src.framePosition = AVAudioFramePosition(s.lowerBound)
-            var left = s.count
-            while left > 0 {
-                try src.read(into: buf, frameCount: AVAudioFrameCount(min(left, chunk)))
-                if buf.frameLength == 0 { break }
-                try out.write(from: buf)
-                left -= Int(buf.frameLength)
-            }
+        let out = try AVAudioFile(forWriting: outURL, settings: files[0].fileFormat.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let total = length
+        var t = 0
+        while t < total {
+            let n = min(65536, total - t)
+            try out.write(from: try read(t..<(t + n)))
+            t += n
         }
         return outURL   // `out` is released on return, which finalizes the WAV header
+    }
+
+    /// The recording and the converted copies of appended files (the user's originals are never touched).
+    private func removeTempFiles() {
+        for u in [url] + imported { try? FileManager.default.removeItem(at: u) }
     }
 
     /// Returns true when the file was saved and the window can close.
@@ -314,7 +517,7 @@ import UniformTypeIdentifiers
             let rendered = try render()
             if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
             try FileManager.default.moveItem(at: rendered, to: dest)
-            try? FileManager.default.removeItem(at: url)
+            removeTempFiles()
             finished = true
             return true
         } catch {
@@ -331,7 +534,7 @@ import UniformTypeIdentifiers
         a.addButton(withTitle: "Abbrechen")
         guard a.runModal() == .alertFirstButtonReturn else { return false }
         stopPlayback()
-        try? FileManager.default.removeItem(at: url)
+        removeTempFiles()
         finished = true
         return true
     }
@@ -350,7 +553,7 @@ import UniformTypeIdentifiers
             return save()
         case .alertSecondButtonReturn:
             stopPlayback()
-            try? FileManager.default.removeItem(at: url)
+            removeTempFiles()
             finished = true
             return true
         default:
@@ -407,6 +610,12 @@ struct WindowCloseHook: NSViewRepresentable {
 final class WaveformNSView: NSView {
     var model: EditorModel?
     override var isFlipped: Bool { true }
+    /// Top strip: click/drag there moves the playhead. Below it a click places the playhead and a drag moves the clip.
+    static let ruler: CGFloat = 16
+    private var scrubbing = false
+    private var downX: CGFloat = 0
+    private var draggingClip = false
+    private var kHeld = false
 
     // arrow keys need key focus: take it when shown and on click
     override var acceptsFirstResponder: Bool { true }
@@ -418,8 +627,15 @@ final class WaveformNSView: NSView {
         switch e.keyCode {
         case 123: model?.step(-1)   // ←
         case 124: model?.step(1)    // →
+        // J/K/L as in editing programs; K held + J/L steps one frame (hold to scrub)
+        case 40: if !e.isARepeat { kHeld = true; model?.stopPlayback() }   // K
+        case 38: if kHeld { model?.step(-1) } else if !e.isARepeat { model?.shuttle(-1) }   // J
+        case 37: if kHeld { model?.step(1) } else if !e.isARepeat { model?.shuttle(1) }     // L
         default: super.keyDown(with: e)
         }
+    }
+    override func keyUp(with e: NSEvent) {
+        if e.keyCode == 40 { kHeld = false } else { super.keyUp(with: e) }
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -428,9 +644,25 @@ final class WaveformNSView: NSView {
         DispatchQueue.main.async { [weak self] in self?.model?.resized(width: w) }
     }
 
-    override func mouseDown(with e: NSEvent) { window?.makeFirstResponder(self); seek(e) }
-    override func mouseDragged(with e: NSEvent) { seek(e) }
-    private func seek(_ e: NSEvent) { model?.seek(toPixel: Double(convert(e.locationInWindow, from: nil).x)) }
+    override func mouseDown(with e: NSEvent) {
+        window?.makeFirstResponder(self)
+        let p = convert(e.locationInWindow, from: nil)
+        scrubbing = p.y < Self.ruler
+        downX = p.x
+        draggingClip = false
+        model?.seek(toPixel: Double(p.x))
+    }
+    override func mouseDragged(with e: NSEvent) {
+        guard let m = model else { return }
+        let x = convert(e.locationInWindow, from: nil).x
+        if scrubbing { m.seek(toPixel: Double(x)); return }
+        if !draggingClip, abs(x - downX) > 4 { draggingClip = m.beginDrag(atPixel: Double(downX)) }
+        if draggingClip { m.drag(toPixel: Double(x)) }
+    }
+    override func mouseUp(with e: NSEvent) {
+        if draggingClip { model?.endDrag() }
+        draggingClip = false
+    }
 
     override func scrollWheel(with e: NSEvent) {
         // trackpad swipes sideways; a mouse wheel scrolls vertically – both move the timeline
@@ -442,13 +674,25 @@ final class WaveformNSView: NSView {
         guard let m = model, let ctx = NSGraphicsContext.current?.cgContext else { return }
         ctx.setFillColor(NSColor(white: 0.13, alpha: 1).cgColor)
         ctx.fill(bounds)
-        guard !m.peaks.isEmpty else {
+        guard !m.peaks[0].isEmpty else {
             ("Lade Wellenform…" as NSString).draw(at: NSPoint(x: 12, y: 12), withAttributes: [.foregroundColor: NSColor.secondaryLabelColor])
             return
         }
         let fpp = m.framesPerPixel, start = m.viewStart, len = m.length
         let gain = Float(pow(2, m.ampZoom))
         func x(_ f: Int) -> CGFloat { CGFloat((Double(f) - start) / fpp) }
+
+        // clips: alternating shade, the dragged one highlighted
+        let top = Self.ruler
+        var t = 0
+        for (k, c) in m.segments.enumerated() {
+            let shade: NSColor = k == m.dragged ? .systemBlue.withAlphaComponent(0.35) : NSColor(white: k % 2 == 0 ? 0.13 : 0.17, alpha: 1)
+            ctx.setFillColor(shade.cgColor)
+            ctx.fill(CGRect(x: x(t), y: top, width: x(t + c.count) - x(t), height: bounds.height - top))
+            t += c.count
+        }
+        ctx.setFillColor(NSColor(white: 0.22, alpha: 1).cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: bounds.width, height: top))
 
         // In/Out range
         if m.markIn != nil || m.markOut != nil {
@@ -458,7 +702,7 @@ final class WaveformNSView: NSView {
         }
 
         // waveform
-        let mid = bounds.midY, h = bounds.height / 2 - 8
+        let mid = (bounds.height + top) / 2, h = (bounds.height - top) / 2 - 8
         let path = CGMutablePath()
         for col in 0..<Int(bounds.width) {
             let a = Int(start + Double(col) * fpp)
@@ -533,7 +777,7 @@ struct EditorContent: View {
             Divider()
             HStack(spacing: 8) {
                 Button { model.togglePlay() } label: { Image(systemName: model.playing ? "pause.fill" : "play.fill").frame(width: 18) }
-                    .keyboardShortcut(.space, modifiers: []).help("Abspielen / Pause (Leertaste)")
+                    .keyboardShortcut(.space, modifiers: []).help("Abspielen / Pause (Leertaste) · J rückwärts, K Stopp, L vorwärts (mehrmals = schneller)")
                 Divider().frame(height: 18)
                 Button("In") { model.setIn() }.keyboardShortcut("i", modifiers: []).help("In-Punkt setzen (I)")
                 Button("Out") { model.setOut() }.keyboardShortcut("o", modifiers: []).help("Out-Punkt setzen (O)")
@@ -541,6 +785,9 @@ struct EditorContent: View {
                     .disabled(model.markIn == nil && model.markOut == nil).help("In bis Out herausschneiden (X)")
                 Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
                     .keyboardShortcut("z", modifiers: .command).disabled(!model.canUndo).help("Rückgängig (⌘Z)")
+                Divider().frame(height: 18)
+                Button { model.importFiles() } label: { Image(systemName: "plus") }
+                    .disabled(model.importing).help("Audiodatei ans Ende anfügen – Clips mit der Maus verschieben")
                 Spacer()
                 Image(systemName: "waveform").foregroundStyle(.secondary)
                 Slider(value: $model.ampZoom, in: 0...5).frame(width: 90).help("Größe der Wellenform")
@@ -558,6 +805,8 @@ struct EditorContent: View {
                 Text("In \(model.markIn.map(model.time) ?? "–")")
                 Text("Out \(model.markOut.map(model.time) ?? "–")")
                 Text("Länge \(model.time(model.length))")
+                if model.speed < 0 || model.speed > 1 { Text(model.speed < 0 ? "◀ \(-model.speed)×" : "▶ \(model.speed)×") }
+                if model.importing { Text("Importiere…") }
                 if let e = model.error { Text(e).foregroundStyle(.red).lineLimit(2).textSelection(.enabled) }
                 Spacer()
                 Button("Verwerfen…") { if model.discard() { dismiss() } }
