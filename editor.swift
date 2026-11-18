@@ -1,4 +1,4 @@
-// Mini editor: waveform timeline, In/Out, Extract (cut + close gap), J/K/L shuttle, appended files, clips moved by drag,
+// Editor "schnitt": tape timeline, In/Out, Extract (cut + close gap), J/K/L shuttle, appended files, clips moved by drag,
 // zoom, play, save as WAV.
 import SwiftUI
 import AVFoundation
@@ -23,6 +23,8 @@ struct Clip: Equatable {
     let sampleRate: Double
     /// Waveform peaks per source file (index = Clip.src). The recording's are filled in after loading.
     @Published var peaks: [[Float]] = [[]]
+    /// Name shown on each source's clips (index = Clip.src).
+    private(set) var names = ["aufnahme"]
     /// Edit list: clips in timeline order. Extract, import and moving clips only change this list.
     @Published var segments: [Clip]
     private var undoStack: [[Clip]] = []
@@ -226,7 +228,7 @@ struct Clip: Equatable {
         let fmt = files[0].processingFormat, settings = files[0].fileFormat.settings
         let dir = url.deletingLastPathComponent()
         for src in urls {
-            let out = dir.appendingPathComponent("SystemRecorder-import-\(UUID().uuidString).wav")
+            let out = dir.appendingPathComponent("Tapedeck-import-\(UUID().uuidString).wav")
             imported.append(out)   // before converting, so a half-written copy is deleted too
             do {
                 try await Task.detached { try Self.convert(src, to: out, format: fmt, settings: settings) }.value
@@ -234,6 +236,7 @@ struct Clip: Equatable {
                 files.append(try AVAudioFile(forReading: out, commonFormat: .pcmFormatFloat32, interleaved: false))
                 readers.append(try AVAudioFile(forReading: out, commonFormat: .pcmFormatFloat32, interleaved: false))
                 peaks.append(p)
+                names.append(src.lastPathComponent)
                 undoStack.append(segments)
                 segments.append(Clip(src: files.count - 1, range: 0..<Int(files.last!.length)))
                 afterLengthChange()
@@ -248,7 +251,7 @@ struct Clip: Equatable {
         let input = try AVAudioFile(forReading: src)
         let out = try AVAudioFile(forWriting: dst, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
         guard let conv = AVAudioConverter(from: input.processingFormat, to: format) else {
-            throw NSError(domain: "SystemRecorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "Format wird nicht unterstützt"])
+            throw NSError(domain: "Tapedeck", code: 1, userInfo: [NSLocalizedDescriptionKey: "Format wird nicht unterstützt"])
         }
         conv.downmix = true   // e.g. 5.1 → stereo; mono is copied to both channels
         conv.sampleRateConverterAlgorithm = AVSampleRateConverterAlgorithm_Mastering
@@ -268,7 +271,7 @@ struct Clip: Equatable {
             if outBuf.frameLength > 0 { try out.write(from: outBuf) }
             if status == .endOfStream { break }
             if status == .error {
-                throw NSError(domain: "SystemRecorder", code: 2, userInfo: [NSLocalizedDescriptionKey: "Umwandlung fehlgeschlagen"])
+                throw NSError(domain: "Tapedeck", code: 2, userInfo: [NSLocalizedDescriptionKey: "Umwandlung fehlgeschlagen"])
             }
         }
     }
@@ -324,6 +327,20 @@ struct Clip: Equatable {
     // MARK: zoom + scroll
 
     var fitFramesPerPixel: Double { max(Self.minFramesPerPixel, Double(length) / max(1, viewWidth)) }
+
+    /// Zoom knob: 0 = whole recording, 1 = closest zoom (log scale in between).
+    var zoomLevel: Double {
+        get {
+            let fit = fitFramesPerPixel
+            guard fit > Self.minFramesPerPixel else { return 0 }
+            return min(1, max(0, log(fit / framesPerPixel) / log(fit / Self.minFramesPerPixel)))
+        }
+        set {
+            let fit = fitFramesPerPixel
+            guard fit > Self.minFramesPerPixel else { return }
+            zoom(fit * pow(Self.minFramesPerPixel / fit, min(1, max(0, newValue))) / framesPerPixel)
+        }
+    }
 
     func fit() {
         isFit = true
@@ -487,7 +504,7 @@ struct Clip: Equatable {
 
     /// Writes the edit list to a new WAV next to the source, in the source's format (48 kHz / 24 bit).
     private func render() throws -> URL {
-        let outURL = url.deletingLastPathComponent().appendingPathComponent("SystemRecorder-edit-\(UUID().uuidString).wav")
+        let outURL = url.deletingLastPathComponent().appendingPathComponent("Tapedeck-edit-\(UUID().uuidString).wav")
         let out = try AVAudioFile(forWriting: outURL, settings: files[0].fileFormat.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
         let total = length
         var t = 0
@@ -610,14 +627,18 @@ struct WindowCloseHook: NSViewRepresentable {
 final class WaveformNSView: NSView {
     var model: EditorModel?
     override var isFlipped: Bool { true }
-    /// Top strip: click/drag there moves the playhead. Below it a click places the playhead and a drag moves the clip.
-    static let ruler: CGFloat = 16
+    override var clipsToBounds: Bool { get { true } set {} }
+    /// Layout of the timeline (pt): ruler with time marks, the In/Out bar below it, then the tape.
+    static let ruler: CGFloat = 22
+    static let tapeTop: CGFloat = 46
+    static let bottomMargin: CGFloat = 26
+    /// Click/drag above the tape moves the playhead. On the tape a click places the playhead and a drag moves the clip.
     private var scrubbing = false
     private var downX: CGFloat = 0
     private var draggingClip = false
     private var kHeld = false
 
-    // arrow keys need key focus: take it when shown and on click
+    // arrow keys and J/K/L need key focus: take it when shown and on click
     override var acceptsFirstResponder: Bool { true }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -647,7 +668,7 @@ final class WaveformNSView: NSView {
     override func mouseDown(with e: NSEvent) {
         window?.makeFirstResponder(self)
         let p = convert(e.locationInWindow, from: nil)
-        scrubbing = p.y < Self.ruler
+        scrubbing = p.y < Self.tapeTop - 4
         downX = p.x
         draggingClip = false
         model?.seek(toPixel: Double(p.x))
@@ -670,67 +691,128 @@ final class WaveformNSView: NSView {
         model?.scroll(pixels: Double(d) * (e.hasPreciseScrollingDeltas ? 1 : 10))
     }
 
+    private static func rgb(_ hex: UInt32, _ a: CGFloat = 1) -> NSColor {
+        NSColor(srgbRed: CGFloat(hex >> 16 & 0xff) / 255, green: CGFloat(hex >> 8 & 0xff) / 255, blue: CGFloat(hex & 0xff) / 255, alpha: a)
+    }
+    private static let tape = rgb(0x2a2623), wave = rgb(0xece6d4), cream = rgb(0xf6f3ea), red = rgb(0xd63c1a)
+
+    /// Ruler step in seconds: the smallest one that keeps labels at least 80 pt apart.
+    private static func step(framesPerPixel fpp: Double, rate: Double) -> Double {
+        let steps: [Double] = [0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1200, 1800, 3600]
+        return steps.first { $0 * rate / fpp >= 80 } ?? 3600
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let m = model, let ctx = NSGraphicsContext.current?.cgContext else { return }
-        ctx.setFillColor(NSColor(white: 0.13, alpha: 1).cgColor)
+        ctx.setFillColor(Self.rgb(0xdcdde0).cgColor)
         ctx.fill(bounds)
-        guard !m.peaks[0].isEmpty else {
-            ("Lade Wellenform…" as NSString).draw(at: NSPoint(x: 12, y: 12), withAttributes: [.foregroundColor: NSColor.secondaryLabelColor])
-            return
-        }
         let fpp = m.framesPerPixel, start = m.viewStart, len = m.length
-        let gain = Float(pow(2, m.ampZoom))
         func x(_ f: Int) -> CGFloat { CGFloat((Double(f) - start) / fpp) }
 
-        // clips: alternating shade, the dragged one highlighted
-        let top = Self.ruler
-        var t = 0
-        for (k, c) in m.segments.enumerated() {
-            let shade: NSColor = k == m.dragged ? .systemBlue.withAlphaComponent(0.35) : NSColor(white: k % 2 == 0 ? 0.13 : 0.17, alpha: 1)
-            ctx.setFillColor(shade.cgColor)
-            ctx.fill(CGRect(x: x(t), y: top, width: x(t + c.count) - x(t), height: bounds.height - top))
-            t += c.count
+        // ruler: minor ticks, major ticks with time
+        let rulerAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9), .foregroundColor: Self.rgb(0x3a3a3a)]
+        ctx.setFillColor(Self.rgb(0x8b8e92).cgColor)
+        ctx.fill(CGRect(x: 0, y: Self.ruler, width: bounds.width, height: 1))
+        let major = Self.step(framesPerPixel: fpp, rate: m.sampleRate), minor = major / 5
+        let firstMinor = Int(floor(start / m.sampleRate / minor))
+        var i = firstMinor
+        while true {
+            let sec = Double(i) * minor
+            let px = CGFloat((sec * m.sampleRate - start) / fpp)
+            if px > bounds.width { break }
+            let isMajor = i % 5 == 0
+            ctx.setFillColor(Self.rgb(isMajor ? 0x55585c : 0x8b8e92).cgColor)
+            ctx.fill(CGRect(x: px, y: Self.ruler - (isMajor ? 10 : 5), width: 1, height: isMajor ? 10 : 5))
+            if isMajor {
+                let t = major < 1 ? String(format: "%d:%04.1f", Int(sec) / 60, sec.truncatingRemainder(dividingBy: 60))
+                                  : String(format: "%d:%02d", Int(sec) / 60, Int(sec) % 60)
+                (t as NSString).draw(at: NSPoint(x: px + 3, y: 2), withAttributes: rulerAttrs)
+            }
+            i += 1
         }
-        ctx.setFillColor(NSColor(white: 0.22, alpha: 1).cgColor)
-        ctx.fill(CGRect(x: 0, y: 0, width: bounds.width, height: top))
 
-        // In/Out range
+        guard !m.peaks[0].isEmpty else {
+            ("lade wellenform …" as NSString).draw(at: NSPoint(x: 8, y: Self.tapeTop + 8), withAttributes: rulerAttrs)
+            return
+        }
+
+        // clips: dark tape with a cream waveform, diagonal splicing tape where two clips meet; the dragged one lifted
+        let tapeH = max(40, bounds.height - Self.tapeTop - Self.bottomMargin)
+        let gain = Float(pow(2, m.ampZoom))
+        let nameAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 9), .foregroundColor: Self.rgb(0xd9d3c3)]
+        var spans: [(k: Int, a: Int, b: Int)] = []
+        var t = 0
+        for (k, c) in m.segments.enumerated() { spans.append((k, t, t + c.count)); t += c.count }
+        let order = spans.filter { $0.k != m.dragged } + spans.filter { $0.k == m.dragged }
+        for sp in order {
+            let x0 = x(sp.a), x1 = x(sp.b)
+            if x1 < -10 || x0 > bounds.width + 10 { continue }
+            let lifted = sp.k == m.dragged
+            let top = Self.tapeTop - (lifted ? 10 : 0)
+            let r = CGRect(x: x0, y: top, width: x1 - x0, height: tapeH)
+            ctx.saveGState()
+            if lifted { ctx.setShadow(offset: CGSize(width: 0, height: 8), blur: 14, color: NSColor.black.withAlphaComponent(0.35).cgColor) }
+            ctx.setFillColor(Self.tape.cgColor)
+            ctx.fill(r)
+            ctx.restoreGState()
+            ctx.saveGState()
+            ctx.clip(to: r)
+            // waveform as 2 pt bars every 3 pt, centred in the clip below its name
+            let mid = top + 18 + (tapeH - 24) / 2, maxH = (tapeH - 24) / 2
+            let bars = CGMutablePath()
+            var col = max(x0, 0)
+            while col < min(x1, bounds.width) {
+                let fa = max(sp.a, Int(start + Double(col) * fpp)), fb = min(sp.b, max(fa + 1, Int(start + Double(col + 3) * fpp)))
+                if fa < fb {
+                    let h = max(1, CGFloat(min(1, m.peak(fa..<fb) * gain)) * maxH)
+                    bars.addRect(CGRect(x: col, y: mid - h, width: 2, height: h * 2))
+                }
+                col += 3
+            }
+            ctx.addPath(bars)
+            ctx.setFillColor(Self.wave.cgColor)
+            ctx.fillPath()
+            (m.names[m.segments[sp.k].src] as NSString).draw(at: NSPoint(x: x0 + (sp.k > 0 ? 12 : 6), y: top + 4), withAttributes: nameAttrs)
+            ctx.restoreGState()
+            if sp.k > 0 && !lifted {
+                let splice = CGMutablePath()
+                splice.addLines(between: [CGPoint(x: x0 - 7 + 6.3, y: top), CGPoint(x: x0 + 7, y: top),
+                                          CGPoint(x: x0 - 7 + 7.7, y: top + tapeH), CGPoint(x: x0 - 7, y: top + tapeH)])
+                splice.closeSubpath()
+                ctx.addPath(splice)
+                ctx.setFillColor(Self.cream.withAlphaComponent(0.82).cgColor)
+                ctx.fillPath()
+            }
+            if lifted {
+                ctx.setStrokeColor(Self.cream.cgColor)
+                ctx.setLineWidth(2)
+                ctx.stroke(r.insetBy(dx: -1, dy: -1))
+            }
+        }
+
+        // In/Out: light range over the tape with cream edges, cream bar under the ruler
         if m.markIn != nil || m.markOut != nil {
             let a = x(m.markIn ?? 0), b = x(m.markOut ?? len)
-            ctx.setFillColor(NSColor.systemBlue.withAlphaComponent(0.28).cgColor)
-            ctx.fill(CGRect(x: a, y: 0, width: b - a, height: bounds.height))
+            ctx.setFillColor(NSColor.white.withAlphaComponent(0.2).cgColor)
+            ctx.fill(CGRect(x: a, y: Self.tapeTop, width: b - a, height: tapeH))
+            ctx.setFillColor(Self.cream.cgColor)
+            ctx.fill(CGRect(x: a, y: Self.tapeTop, width: 2, height: tapeH))
+            ctx.fill(CGRect(x: b - 2, y: Self.tapeTop, width: 2, height: tapeH))
+            let bar = CGRect(x: a, y: 30, width: b - a, height: 10)
+            ctx.fill(bar)
+            ctx.setStrokeColor(Self.rgb(0x8b8e92).cgColor)
+            ctx.setLineWidth(1)
+            ctx.stroke(bar.insetBy(dx: 0.5, dy: 0.5))
         }
 
-        // waveform
-        let mid = (bounds.height + top) / 2, h = (bounds.height - top) / 2 - 8
-        let path = CGMutablePath()
-        for col in 0..<Int(bounds.width) {
-            let a = Int(start + Double(col) * fpp)
-            if a >= len { break }
-            let b = min(len, max(a + 1, Int(start + Double(col + 1) * fpp)))
-            let p = CGFloat(min(1, m.peak(a..<b) * gain)) * h
-            path.addRect(CGRect(x: CGFloat(col), y: mid - p, width: 1, height: max(1, p * 2)))
-        }
-        ctx.addPath(path)
-        ctx.setFillColor(NSColor(red: 0.45, green: 0.8, blue: 0.55, alpha: 1).cgColor)
+        // playhead: red line with a triangle on the ruler
+        let px = x(m.playhead)
+        ctx.setFillColor(Self.red.cgColor)
+        ctx.fill(CGRect(x: px - 1, y: 0, width: 2, height: Self.tapeTop + tapeH + 6))
+        ctx.beginPath()
+        ctx.move(to: CGPoint(x: px - 6, y: 0)); ctx.addLine(to: CGPoint(x: px + 6, y: 0)); ctx.addLine(to: CGPoint(x: px, y: 8))
+        ctx.closePath()
         ctx.fillPath()
-
-        // end of material
-        let endX = x(len)
-        if endX < bounds.width {
-            ctx.setFillColor(NSColor(white: 0.07, alpha: 1).cgColor)
-            ctx.fill(CGRect(x: endX, y: 0, width: bounds.width - endX, height: bounds.height))
-        }
-
-        // cuts, In/Out marks, playhead
-        func line(_ f: Int, _ color: NSColor, _ w: CGFloat) {
-            ctx.setFillColor(color.cgColor)
-            ctx.fill(CGRect(x: x(f) - w / 2, y: 0, width: w, height: bounds.height))
-        }
-        for p in m.editPoints { line(p, .systemYellow.withAlphaComponent(0.8), 1) }
-        if let i = m.markIn { line(i, .white, 1.5) }
-        if let o = m.markOut { line(o, .white, 1.5) }
-        line(m.playhead, .systemRed, 1.5)
     }
 }
 
@@ -748,17 +830,22 @@ struct WaveformView: NSViewRepresentable {
 
 struct EditorView: View {
     let url: URL
+    @Environment(\.dismiss) private var dismiss
     @State private var model: EditorModel?
     @State private var loadError: String?
 
     var body: some View {
         Group {
             if let model { EditorContent(model: model) }
-            else { Text(loadError ?? "Lade…").foregroundStyle(.secondary).padding() }
+            else { Text(loadError ?? "Lade…").foregroundStyle(Deck.label).padding() }
         }
-        .frame(minWidth: 620, minHeight: 240)
+        .frame(minWidth: 820, minHeight: 420)
+        .background(Deck.panel)
+        .environment(\.colorScheme, .light)   // hardware look stays grey in dark mode
         .onAppear {
             guard model == nil else { return }
+            // macOS restores editor windows after a crash: keep them only while their recording still exists
+            guard FileManager.default.fileExists(atPath: url.path) else { dismiss(); return }
             do { model = try EditorModel(url: url) } catch {
                 loadError = "Aufnahme kann nicht geöffnet werden: \(error.localizedDescription)"
             }
@@ -770,52 +857,143 @@ struct EditorContent: View {
     @ObservedObject var model: EditorModel
     @Environment(\.dismiss) private var dismiss
 
+    /// Tape guide pin where the tape enters and leaves the timeline frame.
+    private struct Pin: View {
+        var body: some View {
+            Circle().fill(Deck.rgb(0xe8e8e9)).overlay(Circle().strokeBorder(Deck.rgb(0x55585c), lineWidth: 1)).frame(width: 7, height: 7)
+        }
+    }
+
+    private var status: String? {
+        if let e = model.error { return e }
+        if model.importing { return "importiere …" }
+        if model.speed < 0 || model.speed > 1 { return model.speed < 0 ? "◂ \(-model.speed)×" : "▸ \(model.speed)×" }
+        return nil
+    }
+
+    private var lengthWheels: [String] {
+        let cs = Int((Double(model.length) / model.sampleRate * 100).rounded())
+        return [String(cs / 6000), String(format: "%02d", cs / 100 % 60), String(format: "%02d", cs % 100)]
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            WaveformView(model: model).frame(minHeight: 140)
-                .background(WindowCloseHook { model.confirmClose() })
-            Divider()
-            HStack(spacing: 8) {
-                Button { model.togglePlay() } label: { Image(systemName: model.playing ? "pause.fill" : "play.fill").frame(width: 18) }
-                    .keyboardShortcut(.space, modifiers: []).help("Abspielen / Pause (Leertaste) · J rückwärts, K Stopp, L vorwärts (mehrmals = schneller)")
-                Divider().frame(height: 18)
-                Button("In") { model.setIn() }.keyboardShortcut("i", modifiers: []).help("In-Punkt setzen (I)")
-                Button("Out") { model.setOut() }.keyboardShortcut("o", modifiers: []).help("Out-Punkt setzen (O)")
-                Button("Extrahieren") { model.extract() }.keyboardShortcut("x", modifiers: [])
-                    .disabled(model.markIn == nil && model.markOut == nil).help("In bis Out herausschneiden (X)")
-                Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
-                    .keyboardShortcut("z", modifiers: .command).disabled(!model.canUndo).help("Rückgängig (⌘Z)")
-                Divider().frame(height: 18)
-                Button { model.importFiles() } label: { Image(systemName: "plus") }
-                    .disabled(model.importing).help("Audiodatei ans Ende anfügen – Clips mit der Maus verschieben")
+            HStack(alignment: .top) {
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text("tapedeck").font(.system(size: 15, weight: .bold)).tracking(-0.2).foregroundStyle(Deck.ink)
+                    Text("schnitt").font(.system(size: 15, weight: .light)).tracking(-0.2).foregroundStyle(Deck.label)
+                }
+                .padding(.top, 3)
                 Spacer()
-                Image(systemName: "waveform").foregroundStyle(.secondary)
-                Slider(value: $model.ampZoom, in: 0...5).frame(width: 90).help("Größe der Wellenform")
-                Divider().frame(height: 18)
-                Button { model.zoom(2) } label: { Image(systemName: "minus.magnifyingglass") }
-                    .keyboardShortcut("-", modifiers: .command).help("Herauszoomen (⌘−)")
-                Button { model.zoom(0.5) } label: { Image(systemName: "plus.magnifyingglass") }
-                    .keyboardShortcut("+", modifiers: .command).help("Hineinzoomen (⌘+)")
-                Button("Alles") { model.fit() }.keyboardShortcut("0", modifiers: .command).help("Ganze Aufnahme zeigen (⌘0)")
+                if let status {
+                    Text(status).font(.system(size: 11)).foregroundStyle(model.error != nil ? Deck.red : Deck.label)
+                        .lineLimit(2).textSelection(.enabled).frame(maxWidth: 420).padding(.top, 5)
+                    Spacer()
+                }
+                VStack(spacing: 6) {
+                    CounterWheels(groups: lengthWheels)
+                    Text("länge").font(Deck.labelFont).foregroundStyle(Deck.label)
+                }
             }
-            .padding(.horizontal, 10).padding(.vertical, 8)
-            Divider()
-            HStack(spacing: 14) {
-                Text("Position \(model.time(model.playhead))")
-                Text("In \(model.markIn.map(model.time) ?? "–")")
-                Text("Out \(model.markOut.map(model.time) ?? "–")")
-                Text("Länge \(model.time(model.length))")
-                if model.speed < 0 || model.speed > 1 { Text(model.speed < 0 ? "◀ \(-model.speed)×" : "▶ \(model.speed)×") }
-                if model.importing { Text("Importiere…") }
-                if let e = model.error { Text(e).foregroundStyle(.red).lineLimit(2).textSelection(.enabled) }
+            .padding(.horizontal, 46)
+            .padding(.top, 24)
+
+            // timeline in a thin frame like the head cover; the tape runs in over a pin on each side
+            GeometryReader { g in
+                let tapeY = 14 + WaveformNSView.tapeTop + (g.size.height - 24 - WaveformNSView.tapeTop - WaveformNSView.bottomMargin) / 2
+                ZStack(alignment: .topLeading) {
+                    Path { p in
+                        p.move(to: CGPoint(x: 0, y: tapeY)); p.addLine(to: CGPoint(x: 30, y: tapeY))
+                        p.move(to: CGPoint(x: g.size.width - 30, y: tapeY)); p.addLine(to: CGPoint(x: g.size.width, y: tapeY))
+                    }
+                    .stroke(Deck.rgb(0x3b3835), lineWidth: 1)
+                    Pin().position(x: 30, y: tapeY)
+                    Pin().position(x: g.size.width - 30, y: tapeY)
+                    RoundedRectangle(cornerRadius: 14).stroke(Deck.rgb(0x6f7276), lineWidth: 0.9)
+                        .frame(width: g.size.width - 88, height: g.size.height)
+                        .offset(x: 44)
+                    WaveformView(model: model)
+                        .frame(width: g.size.width - 104, height: g.size.height - 24)
+                        .offset(x: 52, y: 14)
+                        .background(WindowCloseHook { model.confirmClose() })
+                }
+            }
+            .padding(.top, 12)
+
+            HStack(alignment: .top) {
+                VStack(spacing: 8) {
+                    KeyTray {
+                        Button("Rückwärts") { model.shuttle(-1) }.buttonStyle(DeckKeyStyle(latched: model.speed < 0))
+                            .help("Rückwärts abspielen (J) – nochmal drücken = schneller")
+                        Button("Stopp") { model.stopPlayback() }.buttonStyle(DeckKeyStyle(latched: !model.playing))
+                            .help("Stopp (K) – Leertaste: abspielen / stopp")
+                        Button("Vorwärts") { model.shuttle(1) }.buttonStyle(DeckKeyStyle(latched: model.speed > 0))
+                            .help("Vorwärts abspielen (L) – nochmal drücken = schneller")
+                    }
+                    KeyLabels(texts: ["◂◂ rückw.", "stop", "vorw. ▸▸"])
+                }
                 Spacer()
-                Button("Verwerfen…") { if model.discard() { dismiss() } }
-                Button("Speichern…") { if model.save() { dismiss() } }
-                    .keyboardShortcut(.defaultAction).disabled(model.length == 0)
+                VStack(spacing: 8) {
+                    KeyTray {
+                        Button("In") { model.setIn() }.buttonStyle(DeckKeyStyle())
+                            .keyboardShortcut("i", modifiers: []).help("In-Punkt setzen (I)")
+                        Button("Out") { model.setOut() }.buttonStyle(DeckKeyStyle())
+                            .keyboardShortcut("o", modifiers: []).help("Out-Punkt setzen (O)")
+                        Button("Schnitt") { model.extract() }.buttonStyle(DeckKeyStyle())
+                            .keyboardShortcut("x", modifiers: []).disabled(model.markIn == nil && model.markOut == nil)
+                            .help("In bis Out herausschneiden (X)")
+                    }
+                    KeyLabels(texts: ["in", "out", "schnitt"])
+                }
+                Spacer()
+                VStack(spacing: 8) {
+                    KeyTray {
+                        Button("Anfügen") { model.importFiles() }.buttonStyle(DeckKeyStyle()).disabled(model.importing)
+                            .help("Audiodatei ans Ende anfügen – Clips mit der Maus verschieben")
+                        Button("Zurück") { model.undo() }.buttonStyle(DeckKeyStyle())
+                            .keyboardShortcut("z", modifiers: .command).disabled(!model.canUndo).help("Rückgängig (⌘Z)")
+                    }
+                    KeyLabels(texts: ["anfügen", "zurück"])
+                }
+                Spacer()
+                HStack(spacing: 10) {
+                    VStack(spacing: 0) {
+                        Knob(value: Binding(get: { model.zoomLevel }, set: { model.zoomLevel = $0 }),
+                             scale: ["1", "2", "4", "6", "8", "10"], name: "Zoom (⌘+ / ⌘− / ⌘0)")
+                            .padding(.top, -15)
+                        Text("zoom").font(Deck.labelFont).foregroundStyle(Deck.label).padding(.top, -7)
+                    }
+                    VStack(spacing: 0) {
+                        Knob(value: Binding(get: { model.ampZoom / 5 }, set: { model.ampZoom = $0 * 5 }),
+                             scale: ["1", "2", "3", "4", "5", "6"], name: "Höhe der Wellenform")
+                            .padding(.top, -15)
+                        Text("höhe").font(Deck.labelFont).foregroundStyle(Deck.label).padding(.top, -7)
+                    }
+                }
+                Spacer()
+                VStack(spacing: 8) {
+                    KeyTray {
+                        Button("Verwerfen") { if model.discard() { dismiss() } }.buttonStyle(DeckKeyStyle())
+                            .help("Aufnahme verwerfen")
+                        Button("Sichern") { if model.save() { dismiss() } }.buttonStyle(DeckKeyStyle())
+                            .keyboardShortcut(.defaultAction).disabled(model.length == 0).help("Als WAV sichern (↩)")
+                    }
+                    KeyLabels(texts: ["verwerfen", "sichern"])
+                }
             }
-            .font(.callout.monospacedDigit())
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 10).padding(.vertical, 8)
+            .padding(.horizontal, 46)
+            .padding(.top, 22)
+            .padding(.bottom, 20)
+        }
+        // keys without a key of their own on the panel
+        .background {
+            Group {
+                Button("") { model.togglePlay() }.keyboardShortcut(.space, modifiers: [])
+                Button("") { model.zoom(2) }.keyboardShortcut("-", modifiers: .command)
+                Button("") { model.zoom(0.5) }.keyboardShortcut("+", modifiers: .command)
+                Button("") { model.fit() }.keyboardShortcut("0", modifiers: .command)
+            }
+            .opacity(0)
         }
     }
 }

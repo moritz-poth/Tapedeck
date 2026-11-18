@@ -1,22 +1,22 @@
 #!/bin/bash
-# Builds SystemRecorder.app next to this script (ad-hoc signed).
+# Builds Tapedeck.app next to this script (ad-hoc signed).
 set -euo pipefail
 cd "$(dirname "$0")"
-APP=SystemRecorder.app
+APP=Tapedeck.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
 # Universal binary (Apple Silicon + Intel), macOS 13+
 BUILD=$(mktemp -d)
 for arch in arm64 x86_64; do
-  swiftc -O -parse-as-library -target $arch-apple-macos13.0 *.swift -o "$BUILD/SystemRecorder-$arch"
+  swiftc -O -parse-as-library -target $arch-apple-macos13.0 *.swift -o "$BUILD/Tapedeck-$arch"
 done
-lipo -create "$BUILD"/SystemRecorder-* -output "$APP/Contents/MacOS/SystemRecorder"
+lipo -create "$BUILD"/Tapedeck-* -output "$APP/Contents/MacOS/Tapedeck"
 
 # App icon: rendered by the app itself, then scaled into an .icns
 ICONSET=$(mktemp -d)/AppIcon.iconset
 mkdir -p "$ICONSET"
-"$APP/Contents/MacOS/SystemRecorder" --render-icon "$ICONSET/icon_512x512@2x.png"
+"$APP/Contents/MacOS/Tapedeck" --render-icon "$ICONSET/icon_512x512@2x.png"
 for s in 16 32 128 256 512; do
   sips -z $s $s "$ICONSET/icon_512x512@2x.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
   sips -z $((s*2)) $((s*2)) "$ICONSET/icon_512x512@2x.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
@@ -27,12 +27,12 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>com.moritzpoth.SystemRecorder</string>
-  <key>CFBundleName</key><string>SystemRecorder</string>
-  <key>CFBundleExecutable</key><string>SystemRecorder</string>
+  <key>CFBundleIdentifier</key><string>com.moritzpoth.Tapedeck</string>
+  <key>CFBundleName</key><string>Tapedeck</string>
+  <key>CFBundleExecutable</key><string>Tapedeck</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>1.1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

@@ -1,5 +1,5 @@
 # Build output (recreate with ./build.sh or ./dmg.sh)
-SystemRecorder.app/
+Tapedeck.app/
 *.dmg
 .DS_Store
 .omc/

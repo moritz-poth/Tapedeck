@@ -1,5 +1,5 @@
 // Draws the background of the download image's window (540 × 340 pt, see dmg.sh): transparent (Finder shows white,
-// item names stay black in light and dark mode), the title "SYSTEMRECORDER" (Helvetica Neue Light, as in Mountpoint's image)
+// item names stay black in light and dark mode), the title "TAPEDECK" (Helvetica Neue Light, as in Mountpoint's image)
 // and a dry-brush arrow from the app (centre x 140) to the Programme link (centre x 400), icon centres at y 160.
 //   swift scripts/make-dmg-background.swift <out.png> <scale>
 import AppKit
@@ -24,7 +24,7 @@ let cg = NSGraphicsContext.current!.cgContext
 cg.scaleBy(x: scale, y: scale)
 
 // title
-let title = NSAttributedString(string: "SYSTEMRECORDER", attributes: [
+let title = NSAttributedString(string: "TAPEDECK", attributes: [
     .font: NSFont(name: "HelveticaNeue-Light", size: 26) ?? NSFont.systemFont(ofSize: 26, weight: .light),
     .kern: 2.5, .foregroundColor: NSColor(cgColor: ink)!])
 title.draw(at: NSPoint(x: (w - title.size().width + 2.5) / 2, y: h - 58))
