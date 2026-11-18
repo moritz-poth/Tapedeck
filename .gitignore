@@ -2,3 +2,4 @@
 SystemRecorder.app/
 *.dmg
 .DS_Store
+.omc/

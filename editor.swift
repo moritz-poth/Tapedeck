@@ -1,0 +1,572 @@
+// Mini editor: waveform timeline, In/Out, Extract (cut + close gap), zoom, play, save as WAV.
+import SwiftUI
+import AVFoundation
+import UniformTypeIdentifiers
+
+@MainActor final class EditorModel: ObservableObject {
+    /// Open editors, so quitting can ask about each unsaved one.
+    static let open = NSHashTable<EditorModel>.weakObjects()
+    /// Arrow keys step one video frame (25 fps) and play it.
+    static let fps = 25.0
+    nonisolated static let block = 64            // source frames per waveform peak
+    static let minFramesPerPixel = 32.0
+
+    let url: URL
+    let sampleRate: Double
+    @Published var peaks: [Float] = []
+    /// Edit list: source frame ranges in timeline order. Extract only changes this list.
+    @Published var segments: [Range<Int>]
+    private var undoStack: [[Range<Int>]] = []
+    var canUndo: Bool { !undoStack.isEmpty }
+
+    @Published var playhead = 0
+    @Published var markIn: Int?
+    @Published var markOut: Int?
+    @Published var framesPerPixel = 1.0
+    @Published var viewStart = 0.0
+    @Published var playing = false
+    @Published var error: String?
+    /// Vertical waveform zoom as power of two: 0 = 1x … 5 = 32x.
+    @Published var ampZoom = 0.0
+    /// Set once the file is saved or discarded, so closing the window doesn't ask again.
+    private(set) var finished = false   // read by AppDelegate on quit
+    var viewWidth = 600.0
+    private var isFit = true
+
+    private let file: AVAudioFile
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private var playStart = 0
+    private var timer: Timer?
+
+    init(url: URL) throws {
+        self.url = url
+        file = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        sampleRate = file.processingFormat.sampleRate
+        segments = [0..<Int(file.length)]
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: file.processingFormat)
+        Self.open.add(self)
+        Task {
+            let p = try? await Task.detached { try Self.computePeaks(url) }.value
+            peaks = p ?? []
+            fit()
+        }
+    }
+
+    deinit { engine.stop() }
+
+    nonisolated static func computePeaks(_ url: URL) throws -> [Float] {
+        let f = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let chunk = AVAudioFrameCount(block * 1024)
+        let buf = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: chunk)!
+        var peaks: [Float] = []
+        peaks.reserveCapacity(Int(f.length) / block + 1)
+        while f.framePosition < f.length {
+            try f.read(into: buf, frameCount: chunk)
+            let n = Int(buf.frameLength)
+            if n == 0 { break }
+            let chans = Int(buf.format.channelCount)
+            var i = 0
+            while i < n {
+                let end = min(i + block, n)
+                var m: Float = 0
+                for c in 0..<chans {
+                    let p = buf.floatChannelData![c]
+                    for j in i..<end { m = max(m, abs(p[j])) }
+                }
+                peaks.append(m)
+                i = end
+            }
+        }
+        return peaks
+    }
+
+    var length: Int { segments.reduce(0) { $0 + $1.count } }
+
+    /// Calls `body` with the source ranges that make up timeline range `r`.
+    func forEachSource(in r: Range<Int>, _ body: (Range<Int>) -> Void) {
+        var t = 0
+        for s in segments {
+            let lo = max(r.lowerBound, t), hi = min(r.upperBound, t + s.count)
+            if lo < hi { body((s.lowerBound + lo - t)..<(s.lowerBound + hi - t)) }
+            t += s.count
+            if t >= r.upperBound { break }
+        }
+    }
+
+    func peak(_ r: Range<Int>) -> Float {
+        guard !peaks.isEmpty else { return 0 }
+        var m: Float = 0
+        forEachSource(in: r) { s in
+            let lo = s.lowerBound / Self.block, hi = min(peaks.count - 1, (s.upperBound - 1) / Self.block)
+            if lo <= hi { for i in lo...hi { m = max(m, peaks[i]) } }
+        }
+        return m
+    }
+
+    /// Timeline positions of the cuts made so far.
+    var editPoints: [Int] {
+        var t = 0
+        return segments.dropLast().map { t += $0.count; return t }
+    }
+
+    // MARK: marks + extract
+
+    func setIn() {
+        markIn = playhead
+        if let o = markOut, o <= playhead { markOut = nil }
+    }
+
+    func setOut() {
+        markOut = playhead
+        if let i = markIn, i >= playhead { markIn = nil }
+    }
+
+    /// Removes In..Out and closes the gap (no In = from start, no Out = to end).
+    func extract() {
+        guard markIn != nil || markOut != nil else { return }
+        let i = markIn ?? 0, o = markOut ?? length
+        guard i < o else { return }
+        stopPlayback()
+        undoStack.append(segments)
+        var out: [Range<Int>] = []
+        var t = 0
+        for s in segments {
+            let a = t, b = t + s.count
+            if b <= i || a >= o {
+                out.append(s)
+            } else {
+                if a < i { out.append(s.lowerBound..<(s.lowerBound + i - a)) }
+                if b > o { out.append((s.lowerBound + o - a)..<s.upperBound) }
+            }
+            t = b
+        }
+        segments = out
+        markIn = nil
+        markOut = nil
+        playhead = min(i, length)
+        afterLengthChange()
+    }
+
+    func undo() {
+        guard let prev = undoStack.popLast() else { return }
+        stopPlayback()
+        segments = prev
+        afterLengthChange()
+    }
+
+    private func afterLengthChange() {
+        if isFit { fit() } else { framesPerPixel = min(framesPerPixel, fitFramesPerPixel); clampView() }
+    }
+
+    // MARK: zoom + scroll
+
+    var fitFramesPerPixel: Double { max(Self.minFramesPerPixel, Double(length) / max(1, viewWidth)) }
+
+    func fit() {
+        isFit = true
+        framesPerPixel = fitFramesPerPixel
+        viewStart = 0
+    }
+
+    func zoom(_ factor: Double) {
+        let visible = viewStart...(viewStart + viewWidth * framesPerPixel)
+        let anchor = visible.contains(Double(playhead)) ? Double(playhead) : viewStart + viewWidth * framesPerPixel / 2
+        let ax = (anchor - viewStart) / framesPerPixel
+        framesPerPixel = min(fitFramesPerPixel, max(Self.minFramesPerPixel, framesPerPixel * factor))
+        isFit = framesPerPixel >= fitFramesPerPixel
+        viewStart = anchor - ax * framesPerPixel
+        clampView()
+    }
+
+    func scroll(pixels: Double) {
+        viewStart -= pixels * framesPerPixel
+        clampView()
+    }
+
+    func resized(width: Double) {
+        viewWidth = width
+        if isFit { fit() } else { framesPerPixel = min(framesPerPixel, fitFramesPerPixel); clampView() }
+    }
+
+    private func clampView() {
+        viewStart = min(max(0, viewStart), max(0, Double(length) - viewWidth * framesPerPixel))
+    }
+
+    func seek(toPixel x: Double) {
+        playhead = min(length, max(0, Int(viewStart + x * framesPerPixel)))
+        if playing { startPlayback() }
+    }
+
+    // MARK: playback
+
+    func togglePlay() { playing ? stopPlayback() : startPlayback() }
+
+    private func startEngine() -> Bool {
+        do { if !engine.isRunning { try engine.start() } } catch {
+            self.error = "Wiedergabe fehlgeschlagen: \(error.localizedDescription)"
+            return false
+        }
+        return true
+    }
+
+    /// Queues timeline range start..<end on the player.
+    private func schedule(from start: Int, to end: Int) {
+        var t = 0
+        for s in segments {
+            let a = max(start, t), b = min(end, t + s.count)
+            if a < b {
+                player.scheduleSegment(file, startingFrame: AVAudioFramePosition(s.lowerBound + a - t),
+                                       frameCount: AVAudioFrameCount(b - a), at: nil)
+            }
+            t += s.count
+            if t >= end { break }
+        }
+    }
+
+    /// One video frame back/forward, playing that frame's audio (hold the key to scrub).
+    func step(_ dir: Int) {
+        stopPlayback()
+        let f = Int(sampleRate / Self.fps)
+        playhead = min(length, max(0, playhead + dir * f))
+        let span = viewWidth * framesPerPixel
+        if Double(playhead) < viewStart || Double(playhead) > viewStart + span {
+            viewStart = Double(playhead) - span / 2
+            clampView()
+        }
+        guard startEngine() else { return }
+        schedule(from: playhead, to: min(length, playhead + f))
+        player.play()
+    }
+
+    private func startPlayback() {
+        player.stop()
+        if playhead >= length { playhead = 0 }
+        guard startEngine() else { return }
+        playStart = playhead
+        schedule(from: playStart, to: length)
+        player.play()
+        playing = true
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tick() }
+        }
+    }
+
+    func stopPlayback() {
+        player.stop()
+        timer?.invalidate()
+        timer = nil
+        playing = false
+    }
+
+    private func tick() {
+        guard let nt = player.lastRenderTime, let pt = player.playerTime(forNodeTime: nt) else { return }
+        let pos = playStart + Int(pt.sampleTime)
+        if pos >= length {
+            stopPlayback()
+            playhead = length
+            return
+        }
+        playhead = pos
+        // page along when the playhead leaves the view
+        if Double(pos) > viewStart + viewWidth * framesPerPixel { viewStart = Double(pos); clampView() }
+    }
+
+    // MARK: save / discard
+
+    func time(_ frames: Int) -> String {
+        let s = Double(frames) / sampleRate
+        return String(format: "%d:%05.2f", Int(s) / 60, s.truncatingRemainder(dividingBy: 60))
+    }
+
+    /// Writes the edit list to a new WAV next to the source, in the source's format (48 kHz / 24 bit).
+    private func render() throws -> URL {
+        let src = try AVAudioFile(forReading: url, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let outURL = url.deletingLastPathComponent().appendingPathComponent("SystemRecorder-edit-\(UUID().uuidString).wav")
+        let out = try AVAudioFile(forWriting: outURL, settings: src.fileFormat.settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let chunk = 65536
+        let buf = AVAudioPCMBuffer(pcmFormat: src.processingFormat, frameCapacity: AVAudioFrameCount(chunk))!
+        for s in segments {
+            src.framePosition = AVAudioFramePosition(s.lowerBound)
+            var left = s.count
+            while left > 0 {
+                try src.read(into: buf, frameCount: AVAudioFrameCount(min(left, chunk)))
+                if buf.frameLength == 0 { break }
+                try out.write(from: buf)
+                left -= Int(buf.frameLength)
+            }
+        }
+        return outURL   // `out` is released on return, which finalizes the WAV header
+    }
+
+    /// Returns true when the file was saved and the window can close.
+    func save() -> Bool {
+        stopPlayback()
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd HH-mm-ss"
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.wav]
+        panel.nameFieldStringValue = "Aufnahme \(fmt.string(from: Date())).wav"
+        guard panel.runModal() == .OK, let dest = panel.url else { return false }
+        do {
+            let rendered = try render()
+            if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
+            try FileManager.default.moveItem(at: rendered, to: dest)
+            try? FileManager.default.removeItem(at: url)
+            finished = true
+            return true
+        } catch {
+            self.error = "Speichern fehlgeschlagen: \(error.localizedDescription)\nOriginal liegt noch unter \(url.path)"
+            return false
+        }
+    }
+
+    func discard() -> Bool {
+        let a = NSAlert()
+        a.messageText = "Aufnahme verwerfen?"
+        a.informativeText = "Die Aufnahme wird gelöscht und kann nicht wiederhergestellt werden."
+        a.addButton(withTitle: "Verwerfen")
+        a.addButton(withTitle: "Abbrechen")
+        guard a.runModal() == .alertFirstButtonReturn else { return false }
+        stopPlayback()
+        try? FileManager.default.removeItem(at: url)
+        finished = true
+        return true
+    }
+
+    /// Red close button / ⌘W: unsaved recording → ask Save / Discard / Cancel.
+    func confirmClose() -> Bool {
+        if finished { return true }
+        let a = NSAlert()
+        a.messageText = "Aufnahme speichern?"
+        a.informativeText = "Ohne Speichern geht die Aufnahme verloren."
+        a.addButton(withTitle: "Speichern…")
+        a.addButton(withTitle: "Verwerfen")
+        a.addButton(withTitle: "Abbrechen")
+        switch a.runModal() {
+        case .alertFirstButtonReturn:
+            return save()
+        case .alertSecondButtonReturn:
+            stopPlayback()
+            try? FileManager.default.removeItem(at: url)
+            finished = true
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+// MARK: - Waveform timeline
+
+/// Wraps SwiftUI's window delegate to ask before closing; everything else is forwarded unchanged.
+final class CloseGuard: NSObject, NSWindowDelegate {
+    weak var original: NSWindowDelegate?
+    let shouldClose: () -> Bool
+    init(original: NSWindowDelegate?, shouldClose: @escaping () -> Bool) {
+        self.original = original
+        self.shouldClose = shouldClose
+    }
+    func windowShouldClose(_ w: NSWindow) -> Bool {
+        shouldClose() && (original?.windowShouldClose?(w) ?? true)
+    }
+    override func responds(to sel: Selector!) -> Bool {
+        super.responds(to: sel) || (original?.responds(to: sel) ?? false)
+    }
+    override func forwardingTarget(for sel: Selector!) -> Any? {
+        original?.responds(to: sel) == true ? original : nil
+    }
+}
+
+/// Put in a window's background to decide whether the red close button / ⌘W may close it.
+struct WindowCloseHook: NSViewRepresentable {
+    let shouldClose: () -> Bool
+    func makeNSView(context: Context) -> HookView { HookView(shouldClose) }
+    func updateNSView(_ v: HookView, context: Context) {}
+
+    final class HookView: NSView {
+        let shouldClose: () -> Bool
+        private var closeGuard: CloseGuard?   // window.delegate is weak, so keep it alive here
+        init(_ shouldClose: @escaping () -> Bool) {
+            self.shouldClose = shouldClose
+            super.init(frame: .zero)
+        }
+        required init?(coder: NSCoder) { fatalError() }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let w = window, closeGuard == nil else { return }
+            let g = CloseGuard(original: w.delegate, shouldClose: shouldClose)
+            closeGuard = g
+            w.delegate = g
+        }
+    }
+}
+
+final class WaveformNSView: NSView {
+    var model: EditorModel?
+    override var isFlipped: Bool { true }
+
+    // arrow keys need key focus: take it when shown and on click
+    override var acceptsFirstResponder: Bool { true }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        DispatchQueue.main.async { [weak self] in self?.window?.makeFirstResponder(self) }
+    }
+    override func keyDown(with e: NSEvent) {
+        switch e.keyCode {
+        case 123: model?.step(-1)   // ←
+        case 124: model?.step(1)    // →
+        default: super.keyDown(with: e)
+        }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        let w = Double(newSize.width)
+        DispatchQueue.main.async { [weak self] in self?.model?.resized(width: w) }
+    }
+
+    override func mouseDown(with e: NSEvent) { window?.makeFirstResponder(self); seek(e) }
+    override func mouseDragged(with e: NSEvent) { seek(e) }
+    private func seek(_ e: NSEvent) { model?.seek(toPixel: Double(convert(e.locationInWindow, from: nil).x)) }
+
+    override func scrollWheel(with e: NSEvent) {
+        // trackpad swipes sideways; a mouse wheel scrolls vertically – both move the timeline
+        let d = abs(e.scrollingDeltaX) > abs(e.scrollingDeltaY) ? e.scrollingDeltaX : e.scrollingDeltaY
+        model?.scroll(pixels: Double(d) * (e.hasPreciseScrollingDeltas ? 1 : 10))
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let m = model, let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.setFillColor(NSColor(white: 0.13, alpha: 1).cgColor)
+        ctx.fill(bounds)
+        guard !m.peaks.isEmpty else {
+            ("Lade Wellenform…" as NSString).draw(at: NSPoint(x: 12, y: 12), withAttributes: [.foregroundColor: NSColor.secondaryLabelColor])
+            return
+        }
+        let fpp = m.framesPerPixel, start = m.viewStart, len = m.length
+        let gain = Float(pow(2, m.ampZoom))
+        func x(_ f: Int) -> CGFloat { CGFloat((Double(f) - start) / fpp) }
+
+        // In/Out range
+        if m.markIn != nil || m.markOut != nil {
+            let a = x(m.markIn ?? 0), b = x(m.markOut ?? len)
+            ctx.setFillColor(NSColor.systemBlue.withAlphaComponent(0.28).cgColor)
+            ctx.fill(CGRect(x: a, y: 0, width: b - a, height: bounds.height))
+        }
+
+        // waveform
+        let mid = bounds.midY, h = bounds.height / 2 - 8
+        let path = CGMutablePath()
+        for col in 0..<Int(bounds.width) {
+            let a = Int(start + Double(col) * fpp)
+            if a >= len { break }
+            let b = min(len, max(a + 1, Int(start + Double(col + 1) * fpp)))
+            let p = CGFloat(min(1, m.peak(a..<b) * gain)) * h
+            path.addRect(CGRect(x: CGFloat(col), y: mid - p, width: 1, height: max(1, p * 2)))
+        }
+        ctx.addPath(path)
+        ctx.setFillColor(NSColor(red: 0.45, green: 0.8, blue: 0.55, alpha: 1).cgColor)
+        ctx.fillPath()
+
+        // end of material
+        let endX = x(len)
+        if endX < bounds.width {
+            ctx.setFillColor(NSColor(white: 0.07, alpha: 1).cgColor)
+            ctx.fill(CGRect(x: endX, y: 0, width: bounds.width - endX, height: bounds.height))
+        }
+
+        // cuts, In/Out marks, playhead
+        func line(_ f: Int, _ color: NSColor, _ w: CGFloat) {
+            ctx.setFillColor(color.cgColor)
+            ctx.fill(CGRect(x: x(f) - w / 2, y: 0, width: w, height: bounds.height))
+        }
+        for p in m.editPoints { line(p, .systemYellow.withAlphaComponent(0.8), 1) }
+        if let i = m.markIn { line(i, .white, 1.5) }
+        if let o = m.markOut { line(o, .white, 1.5) }
+        line(m.playhead, .systemRed, 1.5)
+    }
+}
+
+struct WaveformView: NSViewRepresentable {
+    @ObservedObject var model: EditorModel
+    func makeNSView(context: Context) -> WaveformNSView {
+        let v = WaveformNSView()
+        v.model = model
+        return v
+    }
+    func updateNSView(_ v: WaveformNSView, context: Context) { v.needsDisplay = true }
+}
+
+// MARK: - Window
+
+struct EditorView: View {
+    let url: URL
+    @State private var model: EditorModel?
+    @State private var loadError: String?
+
+    var body: some View {
+        Group {
+            if let model { EditorContent(model: model) }
+            else { Text(loadError ?? "Lade…").foregroundStyle(.secondary).padding() }
+        }
+        .frame(minWidth: 620, minHeight: 240)
+        .onAppear {
+            guard model == nil else { return }
+            do { model = try EditorModel(url: url) } catch {
+                loadError = "Aufnahme kann nicht geöffnet werden: \(error.localizedDescription)"
+            }
+        }
+    }
+}
+
+struct EditorContent: View {
+    @ObservedObject var model: EditorModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 0) {
+            WaveformView(model: model).frame(minHeight: 140)
+                .background(WindowCloseHook { model.confirmClose() })
+            Divider()
+            HStack(spacing: 8) {
+                Button { model.togglePlay() } label: { Image(systemName: model.playing ? "pause.fill" : "play.fill").frame(width: 18) }
+                    .keyboardShortcut(.space, modifiers: []).help("Abspielen / Pause (Leertaste)")
+                Divider().frame(height: 18)
+                Button("In") { model.setIn() }.keyboardShortcut("i", modifiers: []).help("In-Punkt setzen (I)")
+                Button("Out") { model.setOut() }.keyboardShortcut("o", modifiers: []).help("Out-Punkt setzen (O)")
+                Button("Extrahieren") { model.extract() }.keyboardShortcut("x", modifiers: [])
+                    .disabled(model.markIn == nil && model.markOut == nil).help("In bis Out herausschneiden (X)")
+                Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+                    .keyboardShortcut("z", modifiers: .command).disabled(!model.canUndo).help("Rückgängig (⌘Z)")
+                Spacer()
+                Image(systemName: "waveform").foregroundStyle(.secondary)
+                Slider(value: $model.ampZoom, in: 0...5).frame(width: 90).help("Größe der Wellenform")
+                Divider().frame(height: 18)
+                Button { model.zoom(2) } label: { Image(systemName: "minus.magnifyingglass") }
+                    .keyboardShortcut("-", modifiers: .command).help("Herauszoomen (⌘−)")
+                Button { model.zoom(0.5) } label: { Image(systemName: "plus.magnifyingglass") }
+                    .keyboardShortcut("+", modifiers: .command).help("Hineinzoomen (⌘+)")
+                Button("Alles") { model.fit() }.keyboardShortcut("0", modifiers: .command).help("Ganze Aufnahme zeigen (⌘0)")
+            }
+            .padding(.horizontal, 10).padding(.vertical, 8)
+            Divider()
+            HStack(spacing: 14) {
+                Text("Position \(model.time(model.playhead))")
+                Text("In \(model.markIn.map(model.time) ?? "–")")
+                Text("Out \(model.markOut.map(model.time) ?? "–")")
+                Text("Länge \(model.time(model.length))")
+                if let e = model.error { Text(e).foregroundStyle(.red).lineLimit(2).textSelection(.enabled) }
+                Spacer()
+                Button("Verwerfen…") { if model.discard() { dismiss() } }
+                Button("Speichern…") { if model.save() { dismiss() } }
+                    .keyboardShortcut(.defaultAction).disabled(model.length == 0)
+            }
+            .font(.callout.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10).padding(.vertical, 8)
+        }
+    }
+}

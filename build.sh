@@ -9,7 +9,7 @@ mkdir -p "$APP/Contents/Resources"
 # Universal binary (Apple Silicon + Intel), macOS 13+
 BUILD=$(mktemp -d)
 for arch in arm64 x86_64; do
-  swiftc -O -parse-as-library -target $arch-apple-macos13.0 main.swift -o "$BUILD/SystemRecorder-$arch"
+  swiftc -O -parse-as-library -target $arch-apple-macos13.0 *.swift -o "$BUILD/SystemRecorder-$arch"
 done
 lipo -create "$BUILD"/SystemRecorder-* -output "$APP/Contents/MacOS/SystemRecorder"
 

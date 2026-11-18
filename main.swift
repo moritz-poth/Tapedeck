@@ -71,26 +71,11 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
         queue.sync { file = nil }   // releasing AVAudioFile finalizes the WAV header
         guard let tempURL else { return }
         self.tempURL = nil
-        save(tempURL)
+        onFinished?(tempURL)   // opens the edit window, which saves
     }
 
-    @MainActor private func save(_ temp: URL) {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd HH-mm-ss"
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.wav]
-        panel.nameFieldStringValue = "Aufnahme \(fmt.string(from: Date())).wav"
-        guard panel.runModal() == .OK, let dest = panel.url else {
-            try? FileManager.default.removeItem(at: temp)
-            return
-        }
-        do {
-            if FileManager.default.fileExists(atPath: dest.path) { try FileManager.default.removeItem(at: dest) }
-            try FileManager.default.moveItem(at: temp, to: dest)
-        } catch {
-            self.error = "Speichern fehlgeschlagen: \(error.localizedDescription)\nAufnahme liegt noch unter \(temp.path)"
-        }
-    }
+    /// Called with the finished temp WAV.
+    var onFinished: ((URL) -> Void)?
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, let file, sb.isValid,
@@ -252,7 +237,7 @@ struct DeckKeyStyle<Symbol: View>: ButtonStyle {
 }
 
 struct ContentView: View {
-    @StateObject private var rec = Recorder()
+    @ObservedObject var rec: Recorder
     private let grey = Color(white: 0.5)
     private let red = Color(red: 0.72, green: 0.16, blue: 0.12)
 
@@ -288,7 +273,19 @@ struct ContentView: View {
         .frame(width: 270)
         .background(Panel())
         .environment(\.colorScheme, .light)   // hardware look stays grey in dark mode
+        // closing the main window quits the app (which asks about unsaved recordings)
+        .background(WindowCloseHook { NSApp.terminate(nil); return false })
+        .onAppear {
+            rec.onFinished = { openWindow(value: $0) }
+            // `--edit file.wav` opens a copy in the editor (the editor deletes its file on save/discard)
+            let args = CommandLine.arguments
+            if let i = args.firstIndex(of: "--edit"), i + 1 < args.count {
+                let copy = FileManager.default.temporaryDirectory.appendingPathComponent("SystemRecorder-\(UUID().uuidString).wav")
+                if (try? FileManager.default.copyItem(at: URL(fileURLWithPath: args[i + 1]), to: copy)) != nil { openWindow(value: copy) }
+            }
+        }
     }
+    @Environment(\.openWindow) private var openWindow
 }
 
 // MARK: - App icon (rendered from the same views: `SystemRecorder --render-icon out.png`)
@@ -321,8 +318,29 @@ struct IconView: View {
     do { try png.write(to: URL(fileURLWithPath: path)) } catch { exit(1) }
 }
 
+@MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
+    let recorder = Recorder()
+
+    /// ⌘Q / closing the main window: ask for a running recording and every unsaved edit window.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if recorder.recording {
+            let a = NSAlert()
+            a.messageText = "Aufnahme läuft"
+            a.informativeText = "Beim Beenden geht die laufende Aufnahme verloren."
+            a.addButton(withTitle: "Abbrechen")
+            a.addButton(withTitle: "Beenden")
+            if a.runModal() != .alertSecondButtonReturn { return .terminateCancel }
+        }
+        for m in EditorModel.open.allObjects where !m.finished {
+            if !m.confirmClose() { return .terminateCancel }
+        }
+        return .terminateNow
+    }
+}
+
 @main
 struct SystemRecorderApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var app
     init() {
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--render-icon"), i + 1 < args.count {
@@ -331,7 +349,11 @@ struct SystemRecorderApp: App {
         }
     }
     var body: some Scene {
-        WindowGroup("SystemRecorder") { ContentView() }
+        WindowGroup("SystemRecorder") { ContentView(rec: app.recorder) }
             .windowResizability(.contentSize)
+        WindowGroup("Schnitt", for: URL.self) { $url in
+            if let url { EditorView(url: url) }
+        }
+        .defaultSize(width: 820, height: 300)
     }
 }
