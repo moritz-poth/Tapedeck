@@ -53,4 +53,14 @@ hdiutil detach "/Volumes/$VOL" -quiet || { sleep 2; hdiutil detach "/Volumes/$VO
 hdiutil convert -quiet -ov "$RW" -format UDZO -imagekey zlib-level=9 -o Tapedeck.dmg
 codesign --force -s - Tapedeck.dmg
 lipo -archs Tapedeck.app/Contents/MacOS/Tapedeck
-echo "Fertig: $(pwd)/Tapedeck.dmg"
+# update zip for the in-app updater, signed with the key in this Mac's Keychain (scripts/update-key.swift);
+# the app only installs zips whose .sig matches the public key in updater.swift
+VERSION=$(defaults read "$PWD/Tapedeck.app/Contents/Info" TapedeckRelease)
+ZIP="Tapedeck-$VERSION.zip"
+ditto -c -k --keepParent Tapedeck.app "$ZIP"
+if PUB=$(swift scripts/update-key.swift public 2>/dev/null) && grep -q "\"$PUB\"" updater.swift \
+   && swift scripts/update-key.swift sign "$ZIP"; then
+  echo "Fertig: $(pwd)/Tapedeck.dmg, $ZIP (+ .sig) – für ein Release alle drei hochladen (DMG als Tapedeck-$VERSION.dmg)"
+else
+  echo "Fertig: $(pwd)/Tapedeck.dmg – $ZIP NICHT SIGNIERT, die App installiert es nicht als Update" >&2
+fi

@@ -145,6 +145,8 @@ struct ContentView: View {
         .background(WindowCloseHook { NSApp.terminate(nil); return false })
         .onAppear {
             rec.onFinished = { openWindow(value: $0) }
+            Updater.shared.show = { openWindow(id: "update") }
+            Updater.shared.start()
             // `--edit file.wav` opens a copy in the editor (the editor deletes its file on save/discard)
             let args = CommandLine.arguments
             // onAppear can run more than once (e.g. when the appearance is set): open the file only once
@@ -170,6 +172,13 @@ struct ContentView: View {
     /// The panel is light grey metal: keep light title bars and alerts in dark mode too.
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named: .aqua)
+        Updater.shared.busyReason = { [recorder] in
+            if recorder.recording { return "Gerade läuft eine Aufnahme. Bitte erst stoppen, dann das Update installieren." }
+            if EditorModel.open.allObjects.contains(where: { !$0.finished }) {
+                return "Ein Schnitt ist noch nicht gesichert. Bitte erst sichern oder verwerfen, dann das Update installieren."
+            }
+            return nil
+        }
     }
 
     /// ⌘Q / closing the main window: ask for a running recording and every unsaved edit window.
@@ -192,6 +201,7 @@ struct ContentView: View {
 @main
 struct TapedeckApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var app
+    @Environment(\.openWindow) private var openWindow
     init() {
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--render-icon"), i + 1 < args.count {
@@ -206,5 +216,21 @@ struct TapedeckApp: App {
             if let url { EditorView(url: url) }
         }
         .defaultSize(width: 1040, height: 500)
+        .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("Über Tapedeck") { openWindow(id: "about") }
+                Button("Nach Updates suchen …") { Updater.shared.check(manual: true) }
+            }
+            CommandGroup(replacing: .help) {
+                Button("Tapedeck Handbuch") { openWindow(id: "manual") }.keyboardShortcut("?")
+            }
+        }
+
+        Window("Über Tapedeck", id: "about") { AboutView() }
+            .windowResizability(.contentSize)
+        Window("Update", id: "update") { UpdateView() }
+            .windowResizability(.contentSize)
+        Window("Tapedeck Handbuch", id: "manual") { ManualView() }
+            .defaultSize(width: 640, height: 720)
     }
 }

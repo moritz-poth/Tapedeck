@@ -3,6 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 APP=Tapedeck.app
+VERSION=1.2   # release tag v$VERSION, update zip Tapedeck-$VERSION.zip
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
@@ -22,8 +23,10 @@ for s in 16 32 128 256 512; do
   sips -z $((s*2)) $((s*2)) "$ICONSET/icon_512x512@2x.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+cp -R help "$APP/Contents/Resources/"   # manual (help/de.md + screenshots)
+cp LICENSE "$APP/Contents/Resources/LICENSE.txt"
 cp "$ICONSET/icon_512x512@2x.png" AppIcon.png
-cat > "$APP/Contents/Info.plist" <<'EOF'
+cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -32,7 +35,9 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>CFBundleExecutable</key><string>Tapedeck</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.1</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>TapedeckRelease</key><string>$VERSION</string>
+  <key>CFBundleDevelopmentRegion</key><string>de</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

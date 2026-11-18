@@ -3,3 +3,5 @@ Tapedeck.app/
 *.dmg
 .DS_Store
 .omc/
+*.zip
+*.sig

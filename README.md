@@ -23,6 +23,8 @@ After you stop, the editor opens: trim the recording, cut out what you don't nee
 - **J / K / L** as in editing programs: L plays forward, J backwards, pressing again plays faster (2×, 4×); K stops. Hold K and tap J or L to step one frame.
 - **Add audio files** – *anfügen* appends one or more audio files (WAV, AIFF, MP3, M4A …) at the end of the timeline. They are converted to the recording's format; your original files are never changed.
 - **Move clips** – every piece of the timeline is a clip: the recording, each added file and each part left over after a cut. Drag a clip with the mouse to put it somewhere else; the other clips make room.
+- **Updates from within the app** – when a new version is on GitHub, a small window offers it: *installieren* downloads it, checks its signature, replaces Tapedeck and restarts it; *später* asks again next time; *überspringen* waits for the next version. Check by hand under **Tapedeck → Nach Updates suchen …**. Every update is signed; Tapedeck installs only updates with a valid signature.
+- **Manual** – **Hilfe → Tapedeck Handbuch** (⌘?), and **Tapedeck → Über Tapedeck** for version and license.
 - **Safe** – closing the editor window or quitting asks whether to save or discard the recording. Quitting during a recording asks too. If Tapedeck crashes or is force-quit while the editor is open, macOS reopens the editor with the recording the next time you start Tapedeck.
 
 ## Usage
@@ -84,7 +86,10 @@ Requires the Xcode Command Line Tools.
 ```
 ./build.sh     # → Tapedeck.app (universal, ad-hoc signed)
 ./dmg.sh       # → Tapedeck.dmg (download image with window layout; asks once for Finder automation)
+               #   and Tapedeck-<version>.zip + .sig for the in-app updater
 ```
+
+Updates are signed with an Ed25519 key that lives only in the release Mac's Keychain (`swift scripts/update-key.swift new` once; its public key goes into `Updater.publicKey` in `updater.swift`). `dmg.sh` signs the zip; a release needs the DMG, the zip and its `.sig`. Builds from forks need their own key.
 
 `Tapedeck.app/Contents/MacOS/Tapedeck --edit file.wav` opens a copy of a WAV in the editor without recording.
 
