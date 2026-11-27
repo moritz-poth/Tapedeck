@@ -287,16 +287,23 @@ struct UpdateView: View {
                 Spacer()
                 if updater.available != nil && updater.state != .upToDate {
                     VStack(spacing: 8) {
-                        KeyTray {
-                            Button("Diese Version überspringen") { updater.skip(); dismiss() }.buttonStyle(DeckKeyStyle())
-                                .help("Diese Version überspringen – Tapedeck meldet sich erst bei der nächsten wieder")
-                            Button("Später") { dismiss() }.buttonStyle(DeckKeyStyle())
-                                .keyboardShortcut(.cancelAction).help("Später erinnern")
-                            Button("Installieren") { updater.install() }.buttonStyle(DeckKeyStyle(latched: updater.state == .installing))
-                                .keyboardShortcut(.defaultAction).help("Update installieren (↩)")
+                        // one tray per key, set apart, so the long labels do not run into each other
+                        HStack(spacing: 26) {
+                            KeyTray {
+                                Button("Diese Version überspringen") { updater.skip(); dismiss() }.buttonStyle(DeckKeyStyle())
+                                    .help("Diese Version überspringen – Tapedeck meldet sich erst bei der nächsten wieder")
+                            }
+                            KeyTray {
+                                Button("Später") { dismiss() }.buttonStyle(DeckKeyStyle())
+                                    .keyboardShortcut(.cancelAction).help("Später erinnern")
+                            }
+                            KeyTray {
+                                Button("Installieren") { updater.install() }.buttonStyle(DeckKeyStyle(latched: updater.state == .installing))
+                                    .keyboardShortcut(.defaultAction).help("Update installieren (↩)")
+                            }
                         }
                         .disabled(updater.state == .installing)
-                        KeyLabels(texts: ["überspringen", "später", "installieren"])
+                        KeyLabels(texts: ["überspringen", "später", "installieren"], spacing: 30)
                     }
                 } else {
                     VStack(spacing: 8) {

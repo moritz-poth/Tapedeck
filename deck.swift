@@ -90,8 +90,9 @@ struct KeyTray<Content: View>: View {
 /// One-line labels under the keys of a tray, each centred under its key.
 struct KeyLabels: View {
     var texts: [String]
+    var spacing: CGFloat = 2   // 2 = keys in one tray; one tray per key: gap between trays + 4
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: spacing) {
             ForEach(texts, id: \.self) { t in
                 Text(t).font(Deck.labelFont).foregroundStyle(Deck.label).lineLimit(1).fixedSize()
                     .frame(width: 46)
@@ -125,6 +126,40 @@ struct CounterWheels: View {
         .background(RoundedRectangle(cornerRadius: 2).fill(Deck.rgb(0x1a1a1a)))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(groups.joined(separator: ":"))
+    }
+}
+
+/// Selector in the counter's look: a white plate in a black frame with the current choice and a small arrow.
+/// A see-through menu lies on top, so clicking opens the normal macOS menu (keyboard and VoiceOver included).
+struct DeckSelector<Content: View>: View {
+    var title: String
+    @Binding var selection: String
+    var text: String
+    @ViewBuilder var items: Content
+    @Environment(\.isEnabled) private var enabled
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(text).font(.system(size: 11, weight: .semibold)).foregroundStyle(Deck.rgb(0x111111))
+                .lineLimit(1).truncationMode(.middle)
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.up.chevron.down").font(.system(size: 8, weight: .bold)).foregroundStyle(Deck.rgb(0x444444))
+        }
+        .padding(.horizontal, 7)
+        .frame(height: 18)
+        .background(LinearGradient(stops: [.init(color: Deck.rgb(0xc4c4c4), location: 0),
+                                           .init(color: Deck.rgb(0xfbfbfb), location: 0.3),
+                                           .init(color: Deck.rgb(0xfbfbfb), location: 0.7),
+                                           .init(color: Deck.rgb(0xc4c4c4), location: 1)],
+                                   startPoint: .top, endPoint: .bottom))
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 2).fill(Deck.rgb(0x1a1a1a)))
+        .overlay(RoundedRectangle(cornerRadius: 2).fill(Deck.panel.opacity(enabled ? 0 : 0.5)))
+        .overlay {
+            Picker(title, selection: $selection) { items }
+                .labelsHidden()
+                .opacity(0.02)   // invisible, but still takes the click
+        }
     }
 }
 

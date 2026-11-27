@@ -158,7 +158,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 30)
             .padding(.top, 24)
-            Picker("Quelle", selection: $source) {
+            DeckSelector(title: "Quelle", selection: $source, text: sourceName) {
                 Text("Systemton").tag("system")
                 if !inputs.all.isEmpty { Divider() }
                 ForEach(inputs.all, id: \.uid) { Text($0.name).tag($0.uid) }
@@ -167,8 +167,6 @@ struct ContentView: View {
                     Text("Eingang nicht angeschlossen").tag(source)
                 }
             }
-            .labelsHidden()
-            .controlSize(.small)
             .frame(width: 170)
             .disabled(rec.recording)
             .help("Was aufgenommen wird: der Ton des Macs oder ein Eingang (Mikrofon, Audio-Interface)")
@@ -213,6 +211,11 @@ struct ContentView: View {
     }
 
     private static var editArgHandled = false
+
+    private var sourceName: String {
+        if source == "system" { return "Systemton" }
+        return inputs.all.first(where: { $0.uid == source })?.name ?? "Eingang nicht angeschlossen"
+    }
 
     /// Minutes and seconds for the counter wheels (minutes wrap at 100 like a real counter).
     static func wheels(_ s: Int) -> [String] {
