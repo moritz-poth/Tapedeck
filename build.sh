@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 APP=Tapedeck.app
-VERSION=1.2.2   # release tag v$VERSION, update zip Tapedeck-$VERSION.zip
+VERSION=1.3   # release tag v$VERSION, update zip Tapedeck-$VERSION.zip
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources"
@@ -40,6 +40,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleDevelopmentRegion</key><string>de</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Tapedeck nimmt den gewählten Eingang auf (Mikrofon oder Audio-Interface).</string>
 </dict></plist>
 EOF
 codesign --force -s - "$APP"

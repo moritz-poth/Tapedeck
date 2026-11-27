@@ -2,7 +2,7 @@
 
 Tiny macOS app (SwiftUI, macOS 13+): records the system audio to WAV 48 kHz / 24 bit, then a cut editor in the look of a 1960s tape deck. UI in German only (owner's decision). Shared app rules: `~/.claude/skills/moe-apps/SKILL.md`.
 
-- `main.swift` recorder + record window, `editor.swift` cut editor, `deck.swift` look (keys, counter, knobs, icon), `updater.swift` GitHub updater, `help.swift` About + manual (`help/de.md`).
+- `main.swift` recorder + record window (source menu: system audio or an input device, `UserDefaults` key `source` = `system` or device UID), `input.swift` input devices (CoreAudio list) + capture via AVAudioEngine, `editor.swift` cut editor, `deck.swift` look (keys, counter, knobs, icon), `updater.swift` GitHub updater, `help.swift` About + manual (`help/de.md`).
 - Build: `./build.sh` (version in `VERSION=`), release files: `./dmg.sh` → `Tapedeck.dmg` + signed `Tapedeck-<version>.zip` + `.sig` (key "Tapedeck update key" in the login Keychain, `scripts/update-key.swift`).
 - Test instances share the bundle id and saved window state with the installed app: start them with `-ApplePersistenceIgnoreState YES`, never discard an editor you did not open.
 

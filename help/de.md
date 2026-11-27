@@ -1,19 +1,24 @@
 # Tapedeck
 
-Tapedeck nimmt auf, was dein Mac abspielt – einen Browser-Tab, einen Videoanruf, einen Player – und speichert es als WAV-Datei mit 48 kHz und 24 bit. Vor dem Speichern kannst du die Aufnahme schneiden, andere Audiodateien anfügen und die Teile neu ordnen.
+Tapedeck nimmt auf, was dein Mac abspielt – einen Browser-Tab, einen Videoanruf, einen Player – oder einen Eingang wie ein Mikrofon oder Audio-Interface, und speichert es als WAV-Datei mit 48 kHz und 24 bit. Vor dem Speichern kannst du die Aufnahme schneiden, andere Audiodateien anfügen und die Teile neu ordnen.
 
 ![Das Aufnahmefenster: Schriftzug, Zählwerk und die Tasten aufnahme und stop](aufnahme.png)
 
 ## Aufnehmen
 
+- Wähl im Menü unter dem Zählwerk, was aufgenommen wird: **Systemton** oder einen Eingang (Mikrofon, Audio-Interface). Tapedeck merkt sich die Wahl. Während einer Aufnahme lässt sie sich nicht ändern.
 - Drück **aufnahme** (oder die Leertaste). Die Taste bleibt gedrückt und das Zählwerk läuft, solange Tapedeck aufnimmt.
 - Drück **stop** (oder die Leertaste). Das Schnittfenster öffnet sich.
-- Tapedeck nimmt alles auf, was über den Mac abgespielt wird. Eigene Töne von Tapedeck sind nicht dabei. Es braucht keinen Treiber und ändert nichts an deiner Tonausgabe.
+- Mit **Systemton** nimmt Tapedeck alles auf, was über den Mac abgespielt wird. Eigene Töne von Tapedeck sind nicht dabei. Es braucht keinen Treiber und ändert nichts an deiner Tonausgabe.
+- Ein Eingang wird ebenfalls als WAV mit 48 kHz, 24 bit und Stereo gesichert. Ein Mono-Mikrofon liegt auf beiden Seiten. Von einem Interface mit mehr Eingängen nimmt Tapedeck die ersten zwei.
+- Wird der Eingang während der Aufnahme getrennt, endet die Aufnahme. Das bis dahin Aufgenommene öffnet sich im Schnitt.
 - Bis du sicherst, liegt die Aufnahme nur in einem temporären Ordner.
 
 ## Das Recht zur Aufnahme
 
 Beim ersten Mal fragt macOS nach dem Recht zur **Bildschirm- und Systemaudioaufnahme** – macOS behandelt das Aufnehmen von Systemton wie eine Bildschirmaufnahme. Erlaube Tapedeck unter **Systemeinstellungen → Datenschutz & Sicherheit → Bildschirm- & Systemaudioaufnahme** und starte Tapedeck neu. Tapedeck nimmt nur Ton auf, nie den Bildschirm.
+
+Für einen Eingang fragt macOS beim ersten Mal nach dem Recht für das **Mikrofon**. Erlaube es, oder später unter **Systemeinstellungen → Datenschutz & Sicherheit → Mikrofon**.
 
 ## Schneiden
 

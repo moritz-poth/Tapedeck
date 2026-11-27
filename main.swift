@@ -10,6 +10,7 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
     @Published var error: String?
 
     private var stream: SCStream?
+    private var input: InputCapture?
     private var file: AVAudioFile?   // touched only on `queue` while recording
     private var tempURL: URL?
     private let queue = DispatchQueue(label: "audio")
@@ -21,20 +22,19 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
         starting = true
         defer { starting = false }
         error = nil
+        // "source" is "system" or the UID of an input device (chosen in the record window)
+        let source = UserDefaults.standard.string(forKey: "source") ?? "system"
+        var device: InputDevice?
         do {
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let display = content.displays.first else { throw NSError(domain: "Tapedeck", code: 1, userInfo: [NSLocalizedDescriptionKey: "Kein Bildschirm gefunden."]) }
-
-            let cfg = SCStreamConfiguration()
-            cfg.capturesAudio = true
-            cfg.sampleRate = 48000
-            cfg.channelCount = 2
-            cfg.excludesCurrentProcessAudio = true
-            // Video is required by ScreenCaptureKit but unused: keep it tiny and slow.
-            cfg.width = 2
-            cfg.height = 2
-            cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-
+            if source != "system" {
+                guard let d = InputDevices.shared.all.first(where: { $0.uid == source }) else {
+                    throw NSError(domain: "Tapedeck", code: 3, userInfo: [NSLocalizedDescriptionKey: "Der gewählte Eingang ist nicht angeschlossen."])
+                }
+                guard await AVCaptureDevice.requestAccess(for: .audio) else {
+                    throw NSError(domain: "Tapedeck", code: 4, userInfo: [NSLocalizedDescriptionKey: "Kein Recht für das Mikrofon."])
+                }
+                device = d
+            }
             let url = FileManager.default.temporaryDirectory.appendingPathComponent("Tapedeck-\(UUID().uuidString).wav")
             let settings: [String: Any] = [
                 AVFormatIDKey: kAudioFormatLinearPCM,
@@ -50,6 +50,32 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
             queue.sync { file = f }
             tempURL = url
 
+            if let device {
+                input = try InputCapture(device: device, outFormat: f.processingFormat, write: { [weak self] buf in
+                    self?.queue.sync { self?.write(buf) }
+                }, onStop: { [weak self] in
+                    guard let self, self.recording else { return }
+                    self.error = "Aufnahme abgebrochen: Der Eingang „\(device.name)“ wurde getrennt oder geändert."
+                    Task { await self.stop() }
+                })
+                startDate = Date()
+                recording = true
+                return
+            }
+
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let display = content.displays.first else { throw NSError(domain: "Tapedeck", code: 1, userInfo: [NSLocalizedDescriptionKey: "Kein Bildschirm gefunden."]) }
+
+            let cfg = SCStreamConfiguration()
+            cfg.capturesAudio = true
+            cfg.sampleRate = 48000
+            cfg.channelCount = 2
+            cfg.excludesCurrentProcessAudio = true
+            // Video is required by ScreenCaptureKit but unused: keep it tiny and slow.
+            cfg.width = 2
+            cfg.height = 2
+            cfg.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+
             let s = SCStream(filter: SCContentFilter(display: display, excludingWindows: []), configuration: cfg, delegate: self)
             try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
             try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
@@ -59,13 +85,18 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
             recording = true
         } catch {
             queue.sync { file = nil }
-            self.error = "Aufnahme fehlgeschlagen: \(error.localizedDescription)\nRecht prüfen: Systemeinstellungen → Datenschutz & Sicherheit → Bildschirm- & Systemaudioaufnahme."
+            if let tempURL { try? FileManager.default.removeItem(at: tempURL) }
+            tempURL = nil
+            let where_ = device == nil ? "Bildschirm- & Systemaudioaufnahme" : "Mikrofon"
+            self.error = "Aufnahme fehlgeschlagen: \(error.localizedDescription)\nRecht prüfen: Systemeinstellungen → Datenschutz & Sicherheit → \(where_)."
         }
     }
 
     @MainActor func stop() async {
         try? await stream?.stopCapture()
         stream = nil
+        input?.stop()
+        input = nil
         recording = false
         queue.sync { file = nil }   // releasing AVAudioFile finalizes the WAV header
         guard let tempURL else { return }
@@ -77,7 +108,7 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
     var onFinished: ((URL) -> Void)?
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .audio, let file, sb.isValid,
+        guard type == .audio, file != nil, sb.isValid,
               let fd = sb.formatDescription,
               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd),
               let fmt = AVAudioFormat(streamDescription: asbd) else { return }
@@ -85,6 +116,12 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
         guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: frames) else { return }
         buf.frameLength = frames
         guard CMSampleBufferCopyPCMDataIntoAudioBufferList(sb, at: 0, frameCount: Int32(frames), into: buf.mutableAudioBufferList) == noErr else { return }
+        write(buf)
+    }
+
+    /// On `queue` only.
+    private func write(_ buf: AVAudioPCMBuffer) {
+        guard let file else { return }
         do { try file.write(from: buf) } catch {
             DispatchQueue.main.async { self.error = "Schreibfehler: \(error.localizedDescription)" }
         }
@@ -102,6 +139,8 @@ final class Recorder: NSObject, ObservableObject, SCStreamOutput, SCStreamDelega
 
 struct ContentView: View {
     @ObservedObject var rec: Recorder
+    @ObservedObject private var inputs = InputDevices.shared
+    @AppStorage("source") private var source = "system"
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -119,6 +158,21 @@ struct ContentView: View {
             }
             .padding(.horizontal, 30)
             .padding(.top, 24)
+            Picker("Quelle", selection: $source) {
+                Text("Systemton").tag("system")
+                if !inputs.all.isEmpty { Divider() }
+                ForEach(inputs.all, id: \.uid) { Text($0.name).tag($0.uid) }
+                // a remembered device that is unplugged right now
+                if source != "system", !inputs.all.contains(where: { $0.uid == source }) {
+                    Text("Eingang nicht angeschlossen").tag(source)
+                }
+            }
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(width: 170)
+            .disabled(rec.recording)
+            .help("Was aufgenommen wird: der Ton des Macs oder ein Eingang (Mikrofon, Audio-Interface)")
+            .padding(.top, 14)
             KeyTray {
                 Button("Aufnahme") { Task { await rec.start() } }
                     .buttonStyle(DeckKeyStyle(latched: rec.recording, dot: true))
@@ -127,7 +181,7 @@ struct ContentView: View {
                     .buttonStyle(DeckKeyStyle())
                     .help("Stopp (Leertaste)")
             }
-            .padding(.top, 24)
+            .padding(.top, 18)
             KeyLabels(texts: ["aufnahme", "stop"]).padding(.top, 12)
             if let e = rec.error {
                 Text(e).font(.caption).foregroundStyle(Deck.red).multilineTextAlignment(.center).textSelection(.enabled)

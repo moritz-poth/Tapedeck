@@ -17,6 +17,7 @@ After you stop, the editor opens: trim the recording, cut out what you don't nee
 ## Features
 
 - **Records the system audio** – everything that plays on the Mac, through ScreenCaptureKit. No extra driver (like BlackHole or Loopback) and no change to your sound output. Tapedeck's own sounds are left out.
+- **Or records an input** – a microphone or an audio interface, chosen in a menu in the record window. Mono inputs go to both sides; from interfaces with more inputs the first two are recorded.
 - **WAV, 48 kHz / 24 bit** – the format editing programs expect.
 - **Edit before saving** – after *stop* the window *Schnitt* opens. Nothing is written to your disk until you press *sichern*; until then the recording is a temporary file.
 - **Cut** – set *in* and *out*, *schnitt* removes that part and closes the gap; the join is shown as a piece of splicing tape. ⌘Z undoes every step.
@@ -76,6 +77,8 @@ xattr -dr com.apple.quarantine /Applications/Tapedeck.app
 ```
 
 ### Permission to record
+
+For an input, macOS asks once for **Microphone** access (**System Settings → Privacy & Security → Microphone**).
 
 The first recording asks for permission: macOS treats recording system audio like screen recording. Allow Tapedeck under **System Settings → Privacy & Security → Screen & System Audio Recording** (macOS 13/14: *Screen Recording*) and start Tapedeck again. Tapedeck only records sound, never the screen.
 
