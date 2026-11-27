@@ -130,15 +130,29 @@ struct CounterWheels: View {
 }
 
 /// Selector in the counter's look: a white plate in a black frame with the current choice and a small arrow.
-/// A see-through menu lies on top, so clicking opens the normal macOS menu (keyboard and VoiceOver included).
-struct DeckSelector<Content: View>: View {
+/// Clicking opens a normal macOS menu at the plate. `options` with an empty tag are separators.
+struct DeckSelector: View {
     var title: String
     @Binding var selection: String
-    var text: String
-    @ViewBuilder var items: Content
+    var options: [(tag: String, name: String)]
     @Environment(\.isEnabled) private var enabled
 
+    private var text: String { options.first { $0.tag == selection }?.name ?? "" }
+
     var body: some View {
+        GeometryReader { geo in
+            Button { popUp(below: geo.frame(in: .global)) } label: { plate }
+                .buttonStyle(.plain)
+        }
+        .frame(height: 22)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityValue(text)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { popUp(below: nil) }
+    }
+
+    private var plate: some View {
         HStack(spacing: 6) {
             Text(text).font(.system(size: 11, weight: .semibold)).foregroundStyle(Deck.rgb(0x111111))
                 .lineLimit(1).truncationMode(.middle)
@@ -155,12 +169,36 @@ struct DeckSelector<Content: View>: View {
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 2).fill(Deck.rgb(0x1a1a1a)))
         .overlay(RoundedRectangle(cornerRadius: 2).fill(Deck.panel.opacity(enabled ? 0 : 0.5)))
-        .overlay {
-            Picker(title, selection: $selection) { items }
-                .labelsHidden()
-                .opacity(0.02)   // invisible, but still takes the click
+        .contentShape(Rectangle())
+    }
+
+    /// `rect`: the plate in window coordinates (SwiftUI, top-left origin); nil = at the mouse.
+    private func popUp(below rect: CGRect?) {
+        let menu = NSMenu()
+        for o in options {
+            if o.tag.isEmpty { menu.addItem(.separator()); continue }
+            let action = MenuAction { selection = o.tag }
+            let item = NSMenuItem(title: o.name, action: #selector(MenuAction.run), keyEquivalent: "")
+            item.target = action
+            item.representedObject = action   // NSMenuItem holds its target only weakly
+            item.state = o.tag == selection ? .on : .off
+            menu.addItem(item)
+        }
+        if let rect, let view = NSApp.keyWindow?.contentView {
+            menu.minimumWidth = rect.width
+            // contentView is flipped-free: convert the SwiftUI top-left y to AppKit bottom-left
+            let y = view.isFlipped ? rect.maxY + 2 : view.bounds.height - rect.maxY - 2
+            menu.popUp(positioning: nil, at: NSPoint(x: rect.minX, y: y), in: view)
+        } else {
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
         }
     }
+}
+
+private final class MenuAction: NSObject {
+    let run_: () -> Void
+    init(_ run: @escaping () -> Void) { run_ = run }
+    @objc func run() { run_() }
 }
 
 /// Black rotary knob with a printed scale; drag up/down to turn it. `value` runs 0…1.

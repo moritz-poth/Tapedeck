@@ -158,15 +158,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 30)
             .padding(.top, 24)
-            DeckSelector(title: "Quelle", selection: $source, text: sourceName) {
-                Text("Systemton").tag("system")
-                if !inputs.all.isEmpty { Divider() }
-                ForEach(inputs.all, id: \.uid) { Text($0.name).tag($0.uid) }
-                // a remembered device that is unplugged right now
-                if source != "system", !inputs.all.contains(where: { $0.uid == source }) {
-                    Text("Eingang nicht angeschlossen").tag(source)
-                }
-            }
+            DeckSelector(title: "Quelle", selection: $source, options: sourceOptions)
             .frame(width: 170)
             .disabled(rec.recording)
             .help("Was aufgenommen wird: der Ton des Macs oder ein Eingang (Mikrofon, Audio-Interface)")
@@ -212,9 +204,15 @@ struct ContentView: View {
 
     private static var editArgHandled = false
 
-    private var sourceName: String {
-        if source == "system" { return "Systemton" }
-        return inputs.all.first(where: { $0.uid == source })?.name ?? "Eingang nicht angeschlossen"
+    private var sourceOptions: [(tag: String, name: String)] {
+        var o = [(tag: "system", name: "Systemton")]
+        if !inputs.all.isEmpty { o.append((tag: "", name: "")) }   // separator
+        o += inputs.all.map { (tag: $0.uid, name: $0.name) }
+        // a remembered device that is unplugged right now
+        if source != "system", !inputs.all.contains(where: { $0.uid == source }) {
+            o.append((tag: source, name: "Eingang nicht angeschlossen"))
+        }
+        return o
     }
 
     /// Minutes and seconds for the counter wheels (minutes wrap at 100 like a real counter).
